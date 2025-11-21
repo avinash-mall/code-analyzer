@@ -60,12 +60,16 @@ Write in business/process terms, describing what the system does, not technical 
             name = self._extract_workflow_name(response, entry_point)
             steps = self._extract_steps(response)
             
+            # Generate Mermaid diagram
+            mermaid_diagram = self._generate_mermaid_diagram(call_sequence, repo_map)
+            
             return {
                 'name': name,
                 'entry_point': entry_point,
                 'steps': steps,
                 'description': response,
-                'call_sequence': call_sequence
+                'call_sequence': call_sequence,
+                'mermaid_diagram': mermaid_diagram
             }
         
         except Exception as e:
@@ -139,4 +143,35 @@ Write in business/process terms, describing what the system does, not technical 
                     })
         
         return steps
+    
+    def _generate_mermaid_diagram(self, call_sequence: List[str], repo_map: Dict) -> str:
+        """Generate Mermaid sequence diagram for workflow."""
+        if not call_sequence:
+            return ""
+        
+        lines = ["sequenceDiagram"]
+        
+        # Extract participant names (simplified - use file names)
+        participants = {}
+        for i, file_path in enumerate(call_sequence[:10]):  # Limit to 10 steps
+            # Get class name from file
+            info = repo_map.get(file_path, {})
+            defs = info.get('definitions', [])
+            class_name = defs[0].get('name', file_path.split('/')[-1]) if defs else file_path.split('/')[-1]
+            
+            participant_id = f"P{i}"
+            participants[file_path] = participant_id
+            lines.append(f"    participant {participant_id} as {class_name}")
+        
+        # Add interactions
+        for i in range(len(call_sequence) - 1):
+            current = call_sequence[i]
+            next_file = call_sequence[i + 1]
+            
+            current_id = participants.get(current, f"P{i}")
+            next_id = participants.get(next_file, f"P{i+1}")
+            
+            lines.append(f"    {current_id}->>{next_id}: calls")
+        
+        return '\n'.join(lines)
 

@@ -10,8 +10,39 @@ from llm_client import LocalLLMClient
 class BusinessLogicExtractor:
     """Extracts high-level business logic and rules from code."""
     
-    def __init__(self, llm_client: LocalLLMClient):
+    def __init__(self, llm_client: LocalLLMClient, content_index=None):
         self.llm_client = llm_client
+        self.content_index = content_index
+    
+    def cluster_by_feature(self, repo_map: Dict) -> Dict[str, List[str]]:
+        """Cluster files by semantic features using vector search."""
+        if not self.content_index or not self.content_index.model:
+            # Fallback: cluster by naming conventions
+            return self._cluster_by_naming(repo_map)
+        
+        clusters = {}
+        feature_keywords = ['order', 'payment', 'user', 'inventory', 'notification', 
+                           'invoice', 'shipping', 'product', 'cart', 'auth']
+        
+        for keyword in feature_keywords:
+            results = self.content_index.search(keyword, top_k=10)
+            cluster_files = list(set([r['file'] for r in results]))
+            if cluster_files:
+                clusters[keyword] = cluster_files
+        
+        return clusters
+    
+    def _cluster_by_naming(self, repo_map: Dict) -> Dict[str, List[str]]:
+        """Fallback clustering by file/class names."""
+        clusters = {}
+        for file_path in repo_map.keys():
+            file_lower = file_path.lower()
+            for keyword in ['order', 'payment', 'user', 'inventory']:
+                if keyword in file_lower:
+                    if keyword not in clusters:
+                        clusters[keyword] = []
+                    clusters[keyword].append(file_path)
+        return clusters
     
     def extract_from_file(self, file_path: str, code: str,
                          definitions: List[Dict]) -> Dict:

@@ -117,6 +117,8 @@ class ReportGenerator:
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Codebase Analysis Report</title>
+        <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+        <script>mermaid.initialize({startOnLoad:true});</script>
         <style>
             {{ pygments_css|safe }}
             * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -295,6 +297,46 @@ class ReportGenerator:
             nav { display: none; }
             .section { page-break-inside: avoid; }
         }
+        .mermaid {
+            background: #f8f9fa;
+            padding: 1rem;
+            border-radius: 4px;
+            margin: 1rem 0;
+            text-align: center;
+        }
+        .doc-link {
+            color: #667eea;
+            text-decoration: none;
+            font-weight: 500;
+        }
+        .doc-link:hover {
+            text-decoration: underline;
+        }
+        .code-viewer {
+            background: #f8f9fa;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            padding: 1rem;
+            margin: 1rem 0;
+            max-height: 500px;
+            overflow-y: auto;
+        }
+        .code-line {
+            display: flex;
+            padding: 2px 0;
+        }
+        .code-line-number {
+            color: #999;
+            padding-right: 1rem;
+            user-select: none;
+            min-width: 50px;
+        }
+        .code-line-content {
+            flex: 1;
+        }
+        .code-line.highlight {
+            background: #fff3cd;
+        }
     </style>
 </head>
 <body>
@@ -377,6 +419,12 @@ class ReportGenerator:
                         <div class="doc-section" id="file-{{ file_path|replace('/', '-') }}">
                             <h3>{{ file_path }}</h3>
                             <div>{{ doc.documentation|replace('\\n', '<br>')|safe }}</div>
+                            {% if doc.code_snippet %}
+                                <div class="code-viewer" id="code-{{ file_path|replace('/', '-') }}">
+                                    <h4>Code:</h4>
+                                    {{ code_formatter(doc.code_snippet, doc.language) }}
+                                </div>
+                            {% endif %}
                         </div>
                     {% endfor %}
                 {% else %}
@@ -423,6 +471,12 @@ class ReportGenerator:
                                     {% endfor %}
                                 </ol>
                             {% endif %}
+                            {% if workflow.mermaid_diagram %}
+                                <h4>Workflow Diagram:</h4>
+                                <div class="mermaid">
+{{ workflow.mermaid_diagram }}
+                                </div>
+                            {% endif %}
                         </div>
                     {% endfor %}
                 {% else %}
@@ -453,6 +507,22 @@ class ReportGenerator:
             </section>
         </div>
     </div>
+    <script>
+        // Poll for analysis status if interactive mode
+        if (window.location.search.includes('interactive=true')) {
+            setInterval(function() {
+                fetch('/api/status')
+                    .then(r => r.json())
+                    .then(data => {
+                        if (data.running) {
+                            document.getElementById('analysis-status').style.display = 'block';
+                            document.getElementById('progress-fill').style.width = data.progress + '%';
+                            document.getElementById('status-message').textContent = data.message;
+                        }
+                    });
+            }, 2000);
+        }
+    </script>
 </body>
 </html>"""
     

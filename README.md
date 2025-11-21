@@ -7,11 +7,17 @@ An offline, local LLM-powered system for comprehensive codebase analysis includi
 - **Multi-language Support**: Java, Python, JavaScript, and more via Tree-sitter
 - **Local LLM Integration**: Works with Ollama, vLLM, or any OpenAI-compatible API
 - **Comprehensive Analysis**:
-  - Automated code review and bug detection
-  - Documentation generation
-  - Business logic extraction
-  - Workflow definition
+  - Automated code review and bug detection (with static analysis integration)
+  - Documentation generation (file and method level with cross-references)
+  - Business logic extraction (with semantic clustering)
+  - Workflow definition (with Mermaid diagrams)
   - Process issue detection
+  - Cross-file issue detection
+- **Advanced Features**:
+  - Static analysis tool integration (Semgrep, SonarQube)
+  - Vector embeddings for semantic code search (RAG)
+  - Code viewer with line numbers and anchors
+  - Interactive web UI with progress tracking
 - **Interactive Web UI**: Browse results with hyperlinked navigation
 - **PDF Export**: Generate shareable PDF reports
 

@@ -9,8 +9,9 @@ from llm_client import LocalLLMClient
 class DocumentationGenerator:
     """Generates documentation for code files and components."""
     
-    def __init__(self, llm_client: LocalLLMClient):
+    def __init__(self, llm_client: LocalLLMClient, symbol_to_file: Dict = None):
         self.llm_client = llm_client
+        self.symbol_to_file = symbol_to_file or {}
     
     def generate_file_documentation(self, file_path: str, code: str,
                                    definitions: List[Dict],
@@ -68,9 +69,12 @@ Write in clear, professional documentation style. Be accurate and base your desc
                 system_message="You are a technical documentation writer. Write clear, accurate documentation based on the code provided."
             )
             
+            # Add cross-references
+            response_with_links = self._add_cross_references(response, file_path)
+            
             return {
                 'file': file_path,
-                'documentation': response,
+                'documentation': response_with_links,
                 'definitions': definitions
             }
         
@@ -133,4 +137,74 @@ Write in clear, professional documentation style. Be accurate and base your desc
             'ts': 'typescript'
         }
         return lang_map.get(ext, 'text')
+    
+    def _add_cross_references(self, documentation: str, current_file: str) -> str:
+        """Add hyperlinks to class/function names mentioned in documentation."""
+        import re
+        
+        # Find all potential class/function names (capitalized words, camelCase, etc.)
+        # This is a simple heuristic - could be improved
+        
+        result = documentation
+        
+        # Look for class names (capitalized, possibly with package)
+        for symbol_name, files in self.symbol_to_file.items():
+            if len(symbol_name) < 3:  # Skip very short names
+                continue
+            
+            # Create link pattern
+            # Match whole words only
+            pattern = r'\b' + re.escape(symbol_name) + r'\b'
+            
+            for file_path in files:
+                if file_path != current_file:
+                    # Create anchor link
+                    anchor = file_path.replace('/', '-').replace('\\', '-')
+                    link = f'<a href="#file-{anchor}" class="doc-link">{symbol_name}</a>'
+                    result = re.sub(pattern, link, result, count=1)  # Replace first occurrence only
+                    break  # Use first file that defines it
+        
+        return result
+    
+    def generate_method_documentation(self, file_path: str, method_name: str,
+                                     method_code: str, class_context: str = "") -> Dict:
+        """Generate documentation for a specific method."""
+        prompt = f"""Generate documentation for the following method.
+
+File: {file_path}
+Method: {method_name}
+
+Class context:
+{class_context[:1000] if class_context else 'N/A'}
+
+Method code:
+```{self._get_language_from_path(file_path)}
+{method_code}
+```
+
+Please provide:
+1. Purpose and responsibility
+2. Parameters (if any)
+3. Return value (if any)
+4. Side effects or exceptions
+5. Usage examples if helpful
+"""
+        
+        try:
+            response = self.llm_client.query(
+                prompt,
+                system_message="You are a technical documentation writer. Write clear, accurate method documentation."
+            )
+            
+            return {
+                'method': method_name,
+                'file': file_path,
+                'documentation': response
+            }
+        except Exception as e:
+            return {
+                'method': method_name,
+                'file': file_path,
+                'documentation': f"Error: {e}"
+            }
 

@@ -14,6 +14,8 @@ from typing import Dict
 sys.path.insert(0, str(Path(__file__).parent))
 
 from code_parser import CodeParser, RepositoryIndexer, DependencyGraphBuilder
+from code_parser.static_analyzer import StaticAnalyzer
+from code_parser.content_index import ContentIndex
 from llm_client import LocalLLMClient
 from analyzers import (
     CodeReviewAnalyzer,
@@ -22,6 +24,7 @@ from analyzers import (
     WorkflowAnalyzer,
     ProcessIssueDetector
 )
+from analyzers.cross_file_analyzer import CrossFileAnalyzer
 from ui import ReportGenerator, WebServer
 
 
@@ -105,6 +108,18 @@ def run_analysis(codebase_path: str, config: Dict, start_ui: bool = True):
     # Get repository summary
     repo_summary = indexer.get_repository_summary()
     
+    # Initialize content index (optional, for RAG)
+    print("Initializing content index (optional)...")
+    content_index = ContentIndex()
+    if content_index.model:
+        content_index.index_codebase(repo_map)
+    
+    # Run static analysis (optional)
+    print("Running static analysis (optional)...")
+    static_analyzer = StaticAnalyzer(config.get('static_analysis', {}))
+    static_findings = static_analyzer.run_all(codebase_path)
+    print(f"Static analysis found {sum(len(v) for v in static_findings.values())} issues")
+    
     # Step 2: Initialize LLM
     print("\nStep 2: Initializing LLM client...")
     llm_config = config['llm']
@@ -142,33 +157,49 @@ def run_analysis(codebase_path: str, config: Dict, start_ui: bool = True):
     # Code Review
     if 'code_review' in modules:
         print("  - Code Review & Bug Detection...")
-        review_analyzer = CodeReviewAnalyzer(llm_client)
+        review_analyzer = CodeReviewAnalyzer(llm_client, static_analyzer)
         for file_path, info in list(repo_map.items())[:50]:  # Limit for demo
             code = info.get('code', '')
             if code:
+                file_static_findings = static_findings.get(file_path, [])
                 issues = review_analyzer.analyze_file(
-                    file_path, code, info['definitions'], repo_summary
+                    file_path, code, info['definitions'], repo_summary, file_static_findings
                 )
                 results['code_review']['issues'].extend(issues)
         print(f"    Found {len(results['code_review']['issues'])} issues")
+        
+        # Cross-file analysis
+        print("  - Cross-file Issue Detection...")
+        cross_file_analyzer = CrossFileAnalyzer(llm_client, content_index)
+        cross_file_issues = cross_file_analyzer.analyze_interactions(repo_map, dep_graph)
+        results['code_review']['issues'].extend(cross_file_issues)
+        print(f"    Found {len(cross_file_issues)} cross-file issues")
     
     # Documentation
     if 'documentation' in modules:
         print("  - Documentation Generation...")
-        doc_generator = DocumentationGenerator(llm_client)
+        doc_generator = DocumentationGenerator(llm_client, indexer.symbol_to_file)
         for file_path, info in list(repo_map.items())[:30]:  # Limit for demo
             code = info.get('code', '')
             if code:
                 doc = doc_generator.generate_file_documentation(
                     file_path, code, info['definitions'], info.get('references', [])
                 )
+                # Add code snippet for viewer
+                doc['code_snippet'] = code[:1000]  # First 1000 chars
+                doc['language'] = info.get('language', 'text')
                 results['documentation']['docs'][file_path] = doc
         print(f"    Generated documentation for {len(results['documentation']['docs'])} files")
     
     # Business Logic
     if 'business_logic' in modules:
         print("  - Business Logic Extraction...")
-        biz_extractor = BusinessLogicExtractor(llm_client)
+        biz_extractor = BusinessLogicExtractor(llm_client, content_index)
+        
+        # Cluster by feature
+        clusters = biz_extractor.cluster_by_feature(repo_map)
+        print(f"    Identified {len(clusters)} feature clusters")
+        
         core_files = graph_builder.get_central_files(top_n=10)
         extractions = []
         for file_path in core_files:
@@ -185,7 +216,8 @@ def run_analysis(codebase_path: str, config: Dict, start_ui: bool = True):
         overview = biz_extractor.consolidate_business_logic(extractions, repo_summary)
         results['business_logic'] = {
             'overview': overview,
-            'extractions': extractions
+            'extractions': extractions,
+            'clusters': clusters
         }
         print("    Business logic extracted and consolidated")
     
