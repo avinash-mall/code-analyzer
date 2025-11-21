@@ -1,0 +1,24 @@
+# Core dependencies
+flask>=3.0.0
+openai>=1.0.0
+tree-sitter>=0.20.0
+tree-sitter-languages>=1.0.0
+networkx>=3.0
+jinja2>=3.1.0
+pygments>=2.15.0
+markdown>=3.4.0
+
+# Optional: for PDF generation
+weasyprint>=59.0
+# Alternative: pdfkit (requires wkhtmltopdf binary)
+# pdfkit>=1.0.0
+
+# For embeddings (optional content index)
+sentence-transformers>=2.2.0
+chromadb>=0.4.0
+
+# Utilities
+tqdm>=4.65.0
+pyyaml>=6.0
+python-dotenv>=1.0.0
+

@@ -1,0 +1,69 @@
+# LLM Configuration
+llm:
+  api_base: "http://localhost:11434/v1"  # Ollama default, or http://localhost:8000/v1 for vLLM
+  api_key: "ollama"  # Dummy key for local LLMs
+  model: "codellama:34b"  # Model name as recognized by your LLM server
+  temperature: 0.1
+  max_tokens: 4000
+  timeout: 300
+
+# Analysis Configuration
+analysis:
+  # Languages to analyze
+  languages:
+    - java
+    - python
+    - javascript
+    - typescript
+  
+  # File extensions to include
+  extensions:
+    - .java
+    - .py
+    - .js
+    - .ts
+    - .jsx
+    - .tsx
+  
+  # Exclude patterns (glob)
+  exclude:
+    - "**/node_modules/**"
+    - "**/__pycache__/**"
+    - "**/.git/**"
+    - "**/target/**"
+    - "**/build/**"
+    - "**/*.min.js"
+    - "**/*.min.css"
+  
+  # Maximum file size to analyze (bytes)
+  max_file_size: 1000000  # 1MB
+  
+  # Analysis modules to run
+  modules:
+    - code_review
+    - documentation
+    - business_logic
+    - workflows
+    - process_issues
+
+# Output Configuration
+output:
+  report_dir: "reports"
+  html_file: "analysis_report.html"
+  pdf_file: "analysis_report.pdf"
+  include_code_snippets: true
+  max_code_lines: 50  # Max lines of code to show per snippet
+
+# UI Configuration
+ui:
+  host: "127.0.0.1"
+  port: 5000
+  debug: false
+
+# Static Analysis (optional)
+static_analysis:
+  enabled: false
+  # Add paths to static analysis tools if available
+  # sonarqube_path: ""
+  # semgrep_path: ""
+
