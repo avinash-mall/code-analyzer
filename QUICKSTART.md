@@ -108,8 +108,10 @@ python main.py --codebase /path/to/codebase --config my_config.yaml
 
 ### Tree-sitter Parsing Issues
 
-- Install tree-sitter-languages: `pip install tree-sitter-languages`
-- The system will fall back to regex-based parsing if Tree-sitter fails
+- **Windows Users**: Python files automatically use Python's built-in AST module (no action needed)
+- **Other Languages**: Install tree-sitter-languages: `pip install tree-sitter-languages`
+- The system will fall back to size-based chunking if Tree-sitter fails
+- **PDF Generation**: Uses xhtml2pdf by default (Windows-compatible, no GTK+ needed)
 
 ## Example Output
 

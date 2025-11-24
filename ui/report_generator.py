@@ -3,50 +3,71 @@ HTML and PDF report generation.
 """
 
 import os
-from pathlib import Path
+import markdown
 from typing import Dict, List
-from jinja2 import Template
+from jinja2 import Environment, FileSystemLoader
 from pygments import highlight
-from pygments.lexers import get_lexer_by_name, guess_lexer_for_filename
+from pygments.lexers import get_lexer_by_name
 from pygments.formatters import HtmlFormatter
 
 
 class ReportGenerator:
     """Generates HTML and PDF reports from analysis results."""
     
-    def __init__(self, output_dir: str = "reports"):
-        self.output_dir = output_dir
-        os.makedirs(output_dir, exist_ok=True)
-        self.formatter = HtmlFormatter(style='colorful', linenos=True)
-    
-    def generate_html_report(self, results: Dict, output_file: str = "analysis_report.html") -> str:
+    def __init__(self, output_dir: str, pygments_style: str,
+                 pygments_linenos: bool, code_not_found_message: str):
         """
-        Generate HTML report from analysis results.
+        Initialize report generator.
         
         Args:
-            results: Dictionary containing all analysis results
-            output_file: Output HTML file name
+            output_dir: Output directory for reports
+            pygments_style: Pygments code highlighting style
+            pygments_linenos: Show line numbers in code blocks
+            code_not_found_message: Message when code chunk cannot be found
+        """
+        self.output_dir = output_dir
+        self.code_not_found_message = code_not_found_message
+        os.makedirs(output_dir, exist_ok=True)
+        self.formatter = HtmlFormatter(style=pygments_style, linenos=pygments_linenos, cssclass="code-highlight")
+        
+        # Setup Jinja2 environment
+        template_dir = os.path.join(os.path.dirname(__file__), 'templates')
+        self.jinja_env = Environment(loader=FileSystemLoader(template_dir))
+        self.jinja_env.filters['markdown'] = lambda text: markdown.markdown(text, extensions=['fenced_code'])
+    
+    def generate_report(self, analysis_results: Dict, output_filename: str) -> str:
+        """
+        Generate HTML and PDF reports.
+        
+        Args:
+            analysis_results: Dictionary containing all analysis results.
+            output_filename: Base name for output files (without extension).
         
         Returns:
-            Path to generated HTML file
+            Path to the generated HTML file.
         """
+        html_path = self._generate_html(analysis_results, f"{output_filename}.html")
+        print(f"HTML report generated at: {html_path}")
+        
+        pdf_path = self._generate_pdf(html_path, f"{output_filename}.pdf")
+        if pdf_path:
+            print(f"PDF report generated at: {pdf_path}")
+            
+        return html_path
+
+    def _generate_html(self, results: Dict, output_file: str) -> str:
+        """Generate HTML report from analysis results."""
         output_path = os.path.join(self.output_dir, output_file)
         
-        # Prepare data for template
         template_data = self._prepare_template_data(results)
         
-        # Get Pygments CSS
-        pygments_css = self.formatter.get_style_defs()
+        pygments_css = self.formatter.get_style_defs('.code-highlight')
         template_data['pygments_css'] = pygments_css
         
-        # Load template
-        html_template = self._get_html_template()
-        template = Template(html_template)
+        template = self.jinja_env.get_template('report_template.html')
         
-        # Render
         html_content = template.render(**template_data)
         
-        # Write to file
         with open(output_path, 'w', encoding='utf-8') as f:
             f.write(html_content)
         
@@ -54,499 +75,123 @@ class ReportGenerator:
     
     def _prepare_template_data(self, results: Dict) -> Dict:
         """Prepare data structure for template rendering."""
-        issues = results.get('code_review', {}).get('issues', [])
-        docs = results.get('documentation', {}).get('docs', {})
-        business_logic = results.get('business_logic', {})
-        workflows = results.get('workflows', {}).get('workflows', [])
-        process_issues = results.get('process_issues', {}).get('issues', [])
         
-        # Group issues by file
+        issues = results.get('code_review', [])
+        documentation = results.get('documentation', {})
+        workflows = results.get('workflows', {})
+        architecture = results.get('architecture', "")
+        
+        # Group issues by file and severity
         issues_by_file = {}
         for issue in issues:
-            file_path = issue.get('file', 'unknown')
-            if file_path not in issues_by_file:
-                issues_by_file[file_path] = []
-            issues_by_file[file_path].append(issue)
-        
-        # Group issues by severity
+            file = issue.get('file', 'general')
+            if file not in issues_by_file:
+                issues_by_file[file] = []
+            issues_by_file[file].append(issue)
+
         issues_by_severity = {
             'high': [i for i in issues if i.get('severity') == 'high'],
             'medium': [i for i in issues if i.get('severity') == 'medium'],
             'low': [i for i in issues if i.get('severity') == 'low']
         }
         
-        # Create file index for navigation
-        all_files = set()
-        all_files.update(issues_by_file.keys())
-        all_files.update(docs.keys())
-        all_files = sorted(all_files)
-        
+        # Prepare documentation, linking to code chunks
+        docs_with_code = {}
+        repo_map = results.get('repo_map', {})
+        for file_path, doc_data in documentation.items():
+            file_info = repo_map.get(file_path, {})
+            language = file_info.get('language', 'text')
+            
+            # Format chunk docs with highlighted code
+            for chunk_doc in doc_data.get('chunk_docs', []):
+                # Find original chunk text
+                chunk_text = self.code_not_found_message
+                for chunk in file_info.get('chunks', []):
+                    if chunk['name'] == chunk_doc['name'] and chunk['start_line'] == chunk_doc['start_line']:
+                        chunk_text = chunk['text']
+                        break
+                chunk_doc['code'] = self._format_code(chunk_text, language)
+
+            docs_with_code[file_path] = doc_data
+
         return {
-            'issues': issues,
             'issues_by_file': issues_by_file,
             'issues_by_severity': issues_by_severity,
-            'total_issues': len(issues),
-            'high_issues': len(issues_by_severity['high']),
-            'medium_issues': len(issues_by_severity['medium']),
-            'low_issues': len(issues_by_severity['low']),
-            'documentation': docs,
-            'business_logic': business_logic,
+            'documentation': docs_with_code,
             'workflows': workflows,
-            'process_issues': process_issues,
-            'all_files': all_files,
-            'code_formatter': self._format_code
+            'architecture_overview': architecture,
+            'all_files': sorted(repo_map.keys())
         }
     
-    def _format_code(self, code: str, language: str = None) -> str:
+    def _format_code(self, code: str, language: str) -> str:
         """Format code with syntax highlighting."""
         try:
-            if language:
-                lexer = get_lexer_by_name(language)
-            else:
-                lexer = guess_lexer_for_filename("file.txt", code)
+            lexer = get_lexer_by_name(language)
             return highlight(code, lexer, self.formatter)
-        except:
-            # Fallback: plain code
-            return f'<pre><code>{code}</code></pre>'
-    
-    def _get_html_template(self) -> str:
-        """Get HTML template for report."""
-        return """<!DOCTYPE html>
-<html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Codebase Analysis Report</title>
-        <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
-        <script>mermaid.initialize({startOnLoad:true});</script>
-        <style>
-            {{ pygments_css|safe }}
-            * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-            line-height: 1.6;
-            color: #333;
-            background: #f5f5f5;
-        }
-        .container {
-            max-width: 1200px;
-            margin: 0 auto;
-            background: white;
-            box-shadow: 0 0 20px rgba(0,0,0,0.1);
-        }
-        header {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 2rem;
-            text-align: center;
-        }
-        header h1 {
-            font-size: 2.5rem;
-            margin-bottom: 0.5rem;
-        }
-        nav {
-            background: #2c3e50;
-            padding: 1rem;
-            position: sticky;
-            top: 0;
-            z-index: 100;
-        }
-        nav ul {
-            list-style: none;
-            display: flex;
-            flex-wrap: wrap;
-            justify-content: center;
-            gap: 1rem;
-        }
-        nav a {
-            color: white;
-            text-decoration: none;
-            padding: 0.5rem 1rem;
-            border-radius: 4px;
-            transition: background 0.3s;
-        }
-        nav a:hover {
-            background: rgba(255,255,255,0.1);
-        }
-        .content {
-            padding: 2rem;
-        }
-        .section {
-            margin-bottom: 3rem;
-        }
-        .section h2 {
-            color: #667eea;
-            border-bottom: 3px solid #667eea;
-            padding-bottom: 0.5rem;
-            margin-bottom: 1.5rem;
-        }
-        .section h3 {
-            color: #555;
-            margin-top: 1.5rem;
-            margin-bottom: 1rem;
-        }
-        .summary-cards {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 1rem;
-            margin-bottom: 2rem;
-        }
-        .card {
-            background: #f8f9fa;
-            padding: 1.5rem;
-            border-radius: 8px;
-            border-left: 4px solid #667eea;
-        }
-        .card h3 {
-            color: #667eea;
-            margin: 0 0 0.5rem 0;
-        }
-        .card .number {
-            font-size: 2rem;
-            font-weight: bold;
-            color: #333;
-        }
-        .issue {
-            background: #fff;
-            border-left: 4px solid #e74c3c;
-            padding: 1rem;
-            margin-bottom: 1rem;
-            border-radius: 4px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        }
-        .issue.high { border-left-color: #e74c3c; }
-        .issue.medium { border-left-color: #f39c12; }
-        .issue.low { border-left-color: #3498db; }
-        .issue-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 0.5rem;
-        }
-        .severity-badge {
-            padding: 0.25rem 0.75rem;
-            border-radius: 12px;
-            font-size: 0.85rem;
-            font-weight: bold;
-            text-transform: uppercase;
-        }
-        .severity-high { background: #e74c3c; color: white; }
-        .severity-medium { background: #f39c12; color: white; }
-        .severity-low { background: #3498db; color: white; }
-        .file-link {
-            color: #667eea;
-            text-decoration: none;
-            font-weight: 500;
-        }
-        .file-link:hover {
-            text-decoration: underline;
-        }
-        .doc-section {
-            background: #fff;
-            padding: 1.5rem;
-            margin-bottom: 1.5rem;
-            border-radius: 8px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        }
-        .workflow {
-            background: #fff;
-            padding: 1.5rem;
-            margin-bottom: 1.5rem;
-            border-radius: 8px;
-            border-left: 4px solid #27ae60;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        }
-        .workflow-steps {
-            margin-top: 1rem;
-            padding-left: 1.5rem;
-        }
-        .workflow-steps li {
-            margin-bottom: 0.5rem;
-        }
-        code {
-            background: #f4f4f4;
-            padding: 0.2rem 0.4rem;
-            border-radius: 3px;
-            font-family: 'Courier New', monospace;
-        }
-        pre {
-            background: #f8f9fa;
-            padding: 1rem;
-            border-radius: 4px;
-            overflow-x: auto;
-            margin: 1rem 0;
-        }
-        .toc {
-            background: #f8f9fa;
-            padding: 1rem;
-            border-radius: 8px;
-            margin-bottom: 2rem;
-        }
-        .toc ul {
-            list-style: none;
-            padding-left: 1rem;
-        }
-        .toc a {
-            color: #667eea;
-            text-decoration: none;
-        }
-        .toc a:hover {
-            text-decoration: underline;
-        }
-        @media print {
-            nav { display: none; }
-            .section { page-break-inside: avoid; }
-        }
-        .mermaid {
-            background: #f8f9fa;
-            padding: 1rem;
-            border-radius: 4px;
-            margin: 1rem 0;
-            text-align: center;
-        }
-        .doc-link {
-            color: #667eea;
-            text-decoration: none;
-            font-weight: 500;
-        }
-        .doc-link:hover {
-            text-decoration: underline;
-        }
-        .code-viewer {
-            background: #f8f9fa;
-            border: 1px solid #ddd;
-            border-radius: 4px;
-            padding: 1rem;
-            margin: 1rem 0;
-            max-height: 500px;
-            overflow-y: auto;
-        }
-        .code-line {
-            display: flex;
-            padding: 2px 0;
-        }
-        .code-line-number {
-            color: #999;
-            padding-right: 1rem;
-            user-select: none;
-            min-width: 50px;
-        }
-        .code-line-content {
-            flex: 1;
-        }
-        .code-line.highlight {
-            background: #fff3cd;
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <header>
-            <h1>🤖 Codebase Analysis Report</h1>
-            <p>Comprehensive AI-Powered Code Analysis</p>
-        </header>
+        except Exception:
+            # Fallback for unknown languages
+            return highlight(code, get_lexer_by_name('text'), self.formatter)
+
+    def _generate_pdf(self, html_file: str, pdf_file: str) -> str:
+        """Generate PDF from HTML report using xhtml2pdf (Windows-compatible)."""
+        pdf_path = os.path.join(self.output_dir, pdf_file)
         
-        <nav>
-            <ul>
-                <li><a href="#summary">Summary</a></li>
-                <li><a href="#code-review">Code Review</a></li>
-                <li><a href="#documentation">Documentation</a></li>
-                <li><a href="#business-logic">Business Logic</a></li>
-                <li><a href="#workflows">Workflows</a></li>
-                <li><a href="#process-issues">Process Issues</a></li>
-            </ul>
-        </nav>
-        
-        <div class="content">
-            <!-- Summary Section -->
-            <section id="summary" class="section">
-                <h2>📊 Summary</h2>
-                <div class="summary-cards">
-                    <div class="card">
-                        <h3>Total Issues</h3>
-                        <div class="number">{{ total_issues }}</div>
-                    </div>
-                    <div class="card">
-                        <h3>High Severity</h3>
-                        <div class="number" style="color: #e74c3c;">{{ high_issues }}</div>
-                    </div>
-                    <div class="card">
-                        <h3>Medium Severity</h3>
-                        <div class="number" style="color: #f39c12;">{{ medium_issues }}</div>
-                    </div>
-                    <div class="card">
-                        <h3>Low Severity</h3>
-                        <div class="number" style="color: #3498db;">{{ low_issues }}</div>
-                    </div>
-                </div>
-            </section>
-            
-            <!-- Code Review Section -->
-            <section id="code-review" class="section">
-                <h2>🔍 Code Review & Bug Detection</h2>
-                {% if issues %}
-                    <h3>Issues by File</h3>
-                    {% for file_path, file_issues in issues_by_file.items() %}
-                        <div class="doc-section">
-                            <h4><a href="#file-{{ file_path|replace('/', '-') }}" class="file-link">{{ file_path }}</a></h4>
-                            {% for issue in file_issues %}
-                                <div class="issue {{ issue.severity }}">
-                                    <div class="issue-header">
-                                        <span class="severity-badge severity-{{ issue.severity }}">{{ issue.severity }}</span>
-                                        {% if issue.line %}
-                                            <span>Line {{ issue.line }}</span>
-                                        {% endif %}
-                                    </div>
-                                    <p><strong>Type:</strong> {{ issue.type|replace('_', ' ')|title }}</p>
-                                    <p><strong>Description:</strong> {{ issue.description }}</p>
-                                    {% if issue.suggestion %}
-                                        <p><strong>Suggestion:</strong> {{ issue.suggestion }}</p>
-                                    {% endif %}
-                                </div>
-                            {% endfor %}
-                        </div>
-                    {% endfor %}
-                {% else %}
-                    <p>No issues found.</p>
-                {% endif %}
-            </section>
-            
-            <!-- Documentation Section -->
-            <section id="documentation" class="section">
-                <h2>📚 Documentation</h2>
-                {% if documentation %}
-                    {% for file_path, doc in documentation.items() %}
-                        <div class="doc-section" id="file-{{ file_path|replace('/', '-') }}">
-                            <h3>{{ file_path }}</h3>
-                            <div>{{ doc.documentation|replace('\\n', '<br>')|safe }}</div>
-                            {% if doc.code_snippet %}
-                                <div class="code-viewer" id="code-{{ file_path|replace('/', '-') }}">
-                                    <h4>Code:</h4>
-                                    {{ code_formatter(doc.code_snippet, doc.language) }}
-                                </div>
-                            {% endif %}
-                        </div>
-                    {% endfor %}
-                {% else %}
-                    <p>No documentation generated.</p>
-                {% endif %}
-            </section>
-            
-            <!-- Business Logic Section -->
-            <section id="business-logic" class="section">
-                <h2>💼 Business Logic</h2>
-                {% if business_logic %}
-                    <div class="doc-section">
-                        <h3>Overview</h3>
-                        <div>{{ business_logic.get('overview', 'No overview available.')|replace('\\n', '<br>')|safe }}</div>
-                    </div>
-                    {% if business_logic.get('extractions') %}
-                        <h3>Detailed Extractions</h3>
-                        {% for extraction in business_logic.extractions[:10] %}
-                            <div class="doc-section">
-                                <h4>{{ extraction.file }}</h4>
-                                <p>{{ extraction.domain_logic|replace('\\n', '<br>')|safe }}</p>
-                            </div>
-                        {% endfor %}
-                    {% endif %}
-                {% else %}
-                    <p>No business logic extracted.</p>
-                {% endif %}
-            </section>
-            
-            <!-- Workflows Section -->
-            <section id="workflows" class="section">
-                <h2>🔄 Workflows</h2>
-                {% if workflows %}
-                    {% for workflow in workflows %}
-                        <div class="workflow">
-                            <h3>{{ workflow.name }}</h3>
-                            <p><strong>Entry Point:</strong> {{ workflow.entry_point }}</p>
-                            <div>{{ workflow.description|replace('\\n', '<br>')|safe }}</div>
-                            {% if workflow.steps %}
-                                <h4>Steps:</h4>
-                                <ol class="workflow-steps">
-                                    {% for step in workflow.steps %}
-                                        <li>{{ step.description }}</li>
-                                    {% endfor %}
-                                </ol>
-                            {% endif %}
-                            {% if workflow.mermaid_diagram %}
-                                <h4>Workflow Diagram:</h4>
-                                <div class="mermaid">
-{{ workflow.mermaid_diagram }}
-                                </div>
-                            {% endif %}
-                        </div>
-                    {% endfor %}
-                {% else %}
-                    <p>No workflows defined.</p>
-                {% endif %}
-            </section>
-            
-            <!-- Process Issues Section -->
-            <section id="process-issues" class="section">
-                <h2>⚠️ Process Issues</h2>
-                {% if process_issues %}
-                    {% for issue in process_issues %}
-                        <div class="issue {{ issue.severity }}">
-                            <div class="issue-header">
-                                <span class="severity-badge severity-{{ issue.severity }}">{{ issue.severity }}</span>
-                                <span><strong>Workflow:</strong> {{ issue.workflow }}</span>
-                            </div>
-                            <p><strong>Type:</strong> {{ issue.type|replace('_', ' ')|title }}</p>
-                            <p><strong>Description:</strong> {{ issue.description }}</p>
-                            {% if issue.suggestion %}
-                                <p><strong>Suggestion:</strong> {{ issue.suggestion }}</p>
-                            {% endif %}
-                        </div>
-                    {% endfor %}
-                {% else %}
-                    <p>No process issues found.</p>
-                {% endif %}
-            </section>
-        </div>
-    </div>
-    <script>
-        // Poll for analysis status if interactive mode
-        if (window.location.search.includes('interactive=true')) {
-            setInterval(function() {
-                fetch('/api/status')
-                    .then(r => r.json())
-                    .then(data => {
-                        if (data.running) {
-                            document.getElementById('analysis-status').style.display = 'block';
-                            document.getElementById('progress-fill').style.width = data.progress + '%';
-                            document.getElementById('status-message').textContent = data.message;
-                        }
-                    });
-            }, 2000);
-        }
-    </script>
-</body>
-</html>"""
-    
-    def generate_pdf(self, html_file: str, pdf_file: str = "analysis_report.pdf") -> str:
-        """
-        Generate PDF from HTML report.
-        
-        Args:
-            html_file: Path to HTML file
-            pdf_file: Output PDF file name
-        
-        Returns:
-            Path to generated PDF file
-        """
+        # Try xhtml2pdf first (Windows-compatible, pure Python)
         try:
-            from weasyprint import HTML
-            pdf_path = os.path.join(self.output_dir, pdf_file)
-            HTML(filename=html_file).write_pdf(pdf_path)
+            from xhtml2pdf import pisa
+            from io import BytesIO
+            
+            with open(html_file, 'r', encoding='utf-8') as html_file_handle:
+                html_string = html_file_handle.read()
+            
+            # Create PDF
+            result_file = open(pdf_path, "w+b")
+            pdf = pisa.CreatePDF(
+                BytesIO(html_string.encode('utf-8')),
+                dest=result_file,
+                encoding='utf-8'
+            )
+            result_file.close()
+            
+            if pdf.err:
+                raise Exception(f"PDF generation error: {pdf.err}")
+            
             return pdf_path
+            
         except ImportError:
-            print("WeasyPrint not available. Install with: pip install weasyprint")
-            print("Alternatively, use browser's Print to PDF on the HTML file.")
-            return None
+            # Fallback to WeasyPrint if xhtml2pdf is not available
+            try:
+                from weasyprint import HTML
+                base_url = os.path.dirname(os.path.abspath(__file__))
+                HTML(filename=html_file, base_url=base_url).write_pdf(pdf_path)
+                return pdf_path
+            except ImportError:
+                print("\n" + "="*60)
+                print("No PDF library found. Skipping PDF generation.")
+                print("Install xhtml2pdf (recommended) or weasyprint for PDF support:")
+                print("  pip install xhtml2pdf  # Windows-compatible")
+                print("  pip install weasyprint  # Requires GTK+ on Windows")
+                print("="*60 + "\n")
+                return None
+            except Exception as e:
+                error_msg = str(e)
+                if 'libgobject' in error_msg.lower() or 'gobject' in error_msg.lower() or 'gtk' in error_msg.lower():
+                    print("\n" + "="*60)
+                    print("WeasyPrint failed due to Windows GTK library issue.")
+                    print("Try installing xhtml2pdf instead: pip install xhtml2pdf")
+                    print("The HTML report is available and can be printed to PDF using your browser.")
+                    print("="*60 + "\n")
+                else:
+                    print("\n" + "="*60)
+                    print(f"Error generating PDF with WeasyPrint: {error_msg}")
+                    print("Try installing xhtml2pdf instead: pip install xhtml2pdf")
+                    print("="*60 + "\n")
+                return None
         except Exception as e:
-            print(f"Error generating PDF: {e}")
+            error_msg = str(e)
+            print("\n" + "="*60)
+            print(f"Error generating PDF: {error_msg}")
+            print("The HTML report is still available and can be printed to PDF using your browser.")
+            print("="*60 + "\n")
             return None
 

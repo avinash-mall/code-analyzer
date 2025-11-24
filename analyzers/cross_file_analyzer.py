@@ -10,9 +10,19 @@ from code_parser.content_index import ContentIndex
 class CrossFileAnalyzer:
     """Detects issues that span multiple files."""
     
-    def __init__(self, llm_client: LocalLLMClient, content_index: ContentIndex = None):
+    def __init__(self, llm_client: LocalLLMClient, content_index: ContentIndex,
+                 max_references: int):
+        """
+        Initialize cross-file analyzer.
+        
+        Args:
+            llm_client: LLM client instance
+            content_index: Content index instance
+            max_references: Maximum references to check per file
+        """
         self.llm_client = llm_client
         self.content_index = content_index
+        self.max_references = max_references
     
     def analyze_interactions(self, repo_map: Dict, dependency_graph) -> List[Dict]:
         """
@@ -27,7 +37,7 @@ class CrossFileAnalyzer:
         for file_path, info in repo_map.items():
             references = info.get('references', [])
             
-            for ref in references[:20]:  # Limit to avoid too many queries
+            for ref in references[:self.max_references]:  # Limit to avoid too many queries
                 ref_name = ref.get('name')
                 if not ref_name:
                     continue

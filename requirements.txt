@@ -1,4 +1,4 @@
-# Core dependencies
+# Core dependencies (required)
 flask>=3.0.0
 openai>=1.0.0
 tree-sitter>=0.20.0
@@ -7,18 +7,24 @@ networkx>=3.0
 jinja2>=3.1.0
 pygments>=2.15.0
 markdown>=3.4.0
-
-# Optional: for PDF generation
-weasyprint>=59.0
-# Alternative: pdfkit (requires wkhtmltopdf binary)
-# pdfkit>=1.0.0
-
-# For embeddings (optional content index)
-sentence-transformers>=2.2.0
-chromadb>=0.4.0
-
-# Utilities
 tqdm>=4.65.0
 pyyaml>=6.0
-python-dotenv>=1.0.0
+requests>=2.31.0  # Required for SonarQube REST API integration
 
+# Optional: for PDF generation
+# Install if you want PDF reports (recommended: xhtml2pdf for Windows compatibility)
+xhtml2pdf>=0.2.17  # Windows-compatible, pure Python
+# weasyprint>=59.0  # Alternative, requires GTK+ on Windows
+
+# Optional: for vector embeddings and semantic search (content index)
+# Install if you want RAG/semantic code search features
+sentence-transformers>=2.2.0
+chromadb>=0.4.0
+numpy>=1.24.0  # Required by sentence-transformers
+
+# Optional: for static analysis
+# Install if you want static analysis features
+semgrep>=1.0.0  # Provides the semgrep CLI tool
+
+# Note: SonarQube is an external server tool, not a Python package
+# - SonarQube: Download from https://www.sonarqube.org (requires separate server setup)

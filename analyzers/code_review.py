@@ -3,217 +3,173 @@ Code review and bug detection analyzer.
 """
 
 import re
-from typing import Dict, List, Optional
+from typing import Dict, List
 from llm_client import LocalLLMClient
-from code_parser.static_analyzer import StaticAnalyzer
 
 
 class CodeReviewAnalyzer:
     """Analyzes code for bugs, issues, and code quality problems."""
     
-    def __init__(self, llm_client: LocalLLMClient, static_analyzer: Optional[StaticAnalyzer] = None):
-        self.llm_client = llm_client
-        self.static_analyzer = static_analyzer
-    
-    def analyze_file(self, file_path: str, code: str, 
-                    definitions: List[Dict], repo_summary: str = "",
-                    static_findings: List[Dict] = None) -> List[Dict]:
+    def __init__(self, llm_client: LocalLLMClient, system_message: str, 
+                 repo_summary_context_limit: int, issue_description_key_length: int,
+                 default_issue_type: str, no_issues_message: str):
         """
-        Analyze a file for code issues.
+        Initialize code review analyzer.
+        
+        Args:
+            llm_client: LLM client instance
+            system_message: System message for LLM prompts
+            repo_summary_context_limit: Maximum characters for repository summary context
+            issue_description_key_length: Length of description used for issue deduplication key
+            default_issue_type: Default issue type when type cannot be determined
+            no_issues_message: Message used in prompts when no issues found
+        """
+        self.llm_client = llm_client
+        self.system_message = system_message
+        self.repo_summary_context_limit = repo_summary_context_limit
+        self.issue_description_key_length = issue_description_key_length
+        self.default_issue_type = default_issue_type
+        self.no_issues_message = no_issues_message
+    
+    def analyze_file_chunks(self, file_path: str, chunks: List[Dict], 
+                           language: str, repo_summary: str) -> List[Dict]:
+        """
+        Analyze a file's chunks for code issues.
         
         Args:
             file_path: Path to file
-            code: File content
-            definitions: Extracted definitions
+            chunks: List of code chunks from the parser
+            language: The programming language of the file
             repo_summary: Repository summary for context
-            static_findings: Findings from static analysis tools
         
         Returns:
             List of issues: [{file, line, type, severity, description, suggestion}]
         """
-        # Truncate code if too long
-        max_code_length = 8000  # Approximate token limit
-        code_snippet = code[:max_code_length] if len(code) > max_code_length else code
+        all_issues = []
         
-        # Format definitions for context
-        defs_text = self._format_definitions(definitions)
+        for i, chunk in enumerate(chunks):
+            print(f"  - Analyzing chunk {i+1}/{len(chunks)} ({chunk['name']})...")
+            
+            chunk_text = chunk.get('text', '')
+            if not chunk_text.strip():
+                continue
+            
+            prompt = self._build_prompt(file_path, chunk, language, repo_summary)
+            
+            try:
+                response = self.llm_client.query(
+                    prompt,
+                    system_message=self.system_message
+                )
+                
+                issues = self._parse_issues(response, file_path)
+                all_issues.extend(issues)
+            except Exception as e:
+                print(f"    - Error analyzing chunk {chunk['name']}: {e}")
+                continue
         
-        # Include static analysis findings if available
-        static_hints = ""
-        if static_findings:
-            static_hints = "\n\nStatic analysis findings to verify:\n"
-            for finding in static_findings[:10]:  # Limit to 10
-                static_hints += f"- Line {finding.get('line', '?')}: {finding.get('message', '')} ({finding.get('rule', 'unknown')})\n"
+        return self._deduplicate_issues(all_issues)
+
+    def _build_prompt(self, file_path: str, chunk: Dict, language: str, repo_summary: str) -> str:
+        """Build the prompt for a single code chunk."""
         
-        prompt = f"""Analyze the following code file and identify any potential bugs, errors, or bad practices.
+        code_snippet = chunk['text']
+        start_line = chunk['start_line']
+        chunk_name = chunk['name']
+        no_issues_msg = self.no_issues_message
+        
+        prompt = f"""Review the following code snippet and identify potential bugs, errors, or improvements.
 
 File: {file_path}
+Focus: {chunk_name} (lines {start_line}-{chunk['end_line']})
 
-Code structure:
-{defs_text}
-{static_hints}
-
-Code:
-```{self._get_language_from_path(file_path)}
+Code Snippet:
+```{language}
 {code_snippet}
 ```
 
 Please identify:
-1. Potential bugs (null pointer exceptions, logic errors, etc.)
-2. Security vulnerabilities
-3. Code quality issues (code smells, anti-patterns)
-4. Missing error handling
-5. Concurrency issues
-6. Performance problems
+1.  Potential bugs (null pointer exceptions, logic errors, etc.)
+2.  Security vulnerabilities
+3.  Code quality issues (code smells, anti-patterns)
+4.  Missing error handling or validation
+5.  Performance problems or inefficiencies
 
 For each issue found, provide:
-- Line number (if applicable)
-- Issue type
-- Severity (high/medium/low)
-- Description
-- Suggestion for fix
+-   Line number (relative to the file, if possible, starting from {start_line})
+-   Issue type (e.g., Bug, Vulnerability, Code Smell)
+-   Severity (High/Medium/Low)
+-   Description of the issue
+-   Suggestion for a fix
 
-Format your response as a list, one issue per item. If no issues are found, respond with "No issues found."
+Format your response as a list, one issue per item. If no issues are found, respond with "{no_issues_msg}".
 """
         
         if repo_summary:
-            prompt = f"""Context about the codebase:
-{repo_summary[:2000]}
+            prompt = f"""Brief codebase context:
+{repo_summary[:self.repo_summary_context_limit]}
 
 {prompt}"""
-        
-        try:
-            response = self.llm_client.query(
-                prompt,
-                system_message="You are an expert code reviewer. Be thorough but accurate. Only report real issues."
-            )
             
-            issues = self._parse_issues(response, file_path)
-            
-            # Merge with static findings
-            if static_findings:
-                for finding in static_findings:
-                    # Check if LLM already found this issue
-                    is_duplicate = False
-                    for issue in issues:
-                        if (issue.get('line') == finding.get('line') and
-                            finding.get('message', '').lower() in issue.get('description', '').lower()):
-                            is_duplicate = True
-                            break
-                    
-                    if not is_duplicate:
-                        issues.append({
-                            'file': file_path,
-                            'line': finding.get('line'),
-                            'type': finding.get('type', 'general'),
-                            'severity': finding.get('severity', 'medium'),
-                            'description': finding.get('message', ''),
-                            'suggestion': f"Found by static analyzer: {finding.get('rule', 'unknown')}"
-                        })
-            
-            return issues
-        
-        except Exception as e:
-            print(f"Error analyzing {file_path}: {e}")
-            return []
-    
-    def _format_definitions(self, definitions: List[Dict]) -> str:
-        """Format definitions list for prompt."""
-        if not definitions:
-            return "No major definitions found."
-        
-        lines = []
-        for defn in definitions[:20]:  # Limit to avoid too long context
-            def_type = defn.get('type', 'unknown')
-            name = defn.get('name', 'unknown')
-            line = defn.get('line', '?')
-            lines.append(f"  - {def_type}: {name} (line {line})")
-        
-        return '\n'.join(lines) if lines else "No definitions found."
-    
-    def _get_language_from_path(self, file_path: str) -> str:
-        """Get language identifier from file path."""
-        ext = file_path.split('.')[-1].lower()
-        lang_map = {
-            'java': 'java',
-            'py': 'python',
-            'js': 'javascript',
-            'ts': 'typescript',
-            'jsx': 'jsx',
-            'tsx': 'tsx'
-        }
-        return lang_map.get(ext, 'text')
-    
+        return prompt
+
     def _parse_issues(self, response: str, file_path: str) -> List[Dict]:
         """Parse LLM response into structured issues."""
         issues = []
         
-        # Try to extract issues from response
-        # Look for patterns like "Line X:", "Issue:", etc.
-        lines = response.split('\n')
-        current_issue = None
+        if self.no_issues_message.lower() in response.lower() or "no issues found" in response.lower():
+            return issues
+            
+        # Split response into issue blocks. Issues often start with a number or bullet.
+        issue_blocks = re.split(r'\n(?=\d+\.\s|\*\s|-\s)', response)
         
-        for line in lines:
-            line = line.strip()
-            if not line or line.lower() in ['no issues found.', 'no issues found']:
+        for block in issue_blocks:
+            if not block.strip():
                 continue
+
+            line_num_match = re.search(r'line\s+(\d+)', block, re.IGNORECASE)
+            line_num = int(line_num_match.group(1)) if line_num_match else None
             
-            # Try to extract line number
-            line_match = re.search(r'line\s+(\d+)', line, re.IGNORECASE)
-            line_num = int(line_match.group(1)) if line_match else None
+            severity_match = re.search(r'severity:\s*(high|medium|low)', block, re.IGNORECASE)
+            severity = severity_match.group(1).lower() if severity_match else 'medium'
             
-            # Try to extract severity
-            severity = 'medium'
-            if re.search(r'\b(high|critical|severe)\b', line, re.IGNORECASE):
-                severity = 'high'
-            elif re.search(r'\b(low|minor)\b', line, re.IGNORECASE):
-                severity = 'low'
+            issue_type_match = re.search(r'type:\s*(.+)', block, re.IGNORECASE)
+            issue_type = issue_type_match.group(1).strip() if issue_type_match else self.default_issue_type
+
+            desc_match = re.search(r'description:\s*([\s\S]+?)(?=suggestion:|$)', block, re.IGNORECASE)
+            description = desc_match.group(1).strip() if desc_match else block
             
-            # Try to extract issue type
-            issue_type = 'general'
-            if re.search(r'\b(null|null pointer|npe)\b', line, re.IGNORECASE):
-                issue_type = 'null_pointer'
-            elif re.search(r'\b(security|vulnerability|injection)\b', line, re.IGNORECASE):
-                issue_type = 'security'
-            elif re.search(r'\b(error handling|exception)\b', line, re.IGNORECASE):
-                issue_type = 'error_handling'
-            elif re.search(r'\b(performance|slow|inefficient)\b', line, re.IGNORECASE):
-                issue_type = 'performance'
-            elif re.search(r'\b(concurrency|thread|race)\b', line, re.IGNORECASE):
-                issue_type = 'concurrency'
-            
-            # If line starts with number or bullet, it's likely a new issue
-            if re.match(r'^[\d\-\*•]', line):
-                if current_issue:
-                    issues.append(current_issue)
-                current_issue = {
-                    'file': file_path,
-                    'line': line_num,
-                    'type': issue_type,
-                    'severity': severity,
-                    'description': line,
-                    'suggestion': ''
-                }
-            elif current_issue:
-                # Continue building current issue
-                if 'suggestion' in current_issue and not current_issue['suggestion']:
-                    current_issue['suggestion'] = line
-                else:
-                    current_issue['description'] += ' ' + line
-        
-        if current_issue:
-            issues.append(current_issue)
-        
-        # If parsing failed, create a single issue with the whole response
-        if not issues and response and 'no issues' not in response.lower():
+            sugg_match = re.search(r'suggestion:\s*([\s\S]+)', block, re.IGNORECASE)
+            suggestion = sugg_match.group(1).strip() if sugg_match else ""
+
+            # Clean up description
+            description = re.sub(r'^(line|severity|type|suggestion):.*', '', description, flags=re.IGNORECASE | re.MULTILINE).strip()
+
             issues.append({
                 'file': file_path,
-                'line': None,
-                'type': 'general',
-                'severity': 'medium',
-                'description': response[:500],  # Truncate if too long
-                'suggestion': ''
+                'line': line_num,
+                'type': issue_type,
+                'severity': severity,
+                'description': description,
+                'suggestion': suggestion
             })
-        
+            
         return issues
+        
+    def _deduplicate_issues(self, issues: List[Dict]) -> List[Dict]:
+        """Deduplicate similar issues, especially those without line numbers."""
+        unique_issues = []
+        seen_signatures = set()
+        
+        for issue in issues:
+            # Signature combines file, line (or a placeholder), and first N chars of description
+            line_key = issue.get('line') or -1
+            desc_key = issue.get('description', '')[:self.issue_description_key_length]
+            signature = (issue['file'], line_key, desc_key)
+            
+            if signature not in seen_signatures:
+                unique_issues.append(issue)
+                seen_signatures.add(signature)
+                
+        return unique_issues
 

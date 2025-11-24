@@ -9,8 +9,24 @@ from llm_client import LocalLLMClient
 class ProcessIssueDetector:
     """Detects issues in workflows and processes."""
     
-    def __init__(self, llm_client: LocalLLMClient):
+    def __init__(self, llm_client: LocalLLMClient, system_message: str,
+                 fallback_description_length: int, default_workflow_name: str,
+                 no_steps_message: str):
+        """
+        Initialize process issue detector.
+        
+        Args:
+            llm_client: LLM client instance
+            system_message: System message for LLM prompts
+            fallback_description_length: Fallback description truncation length
+            default_workflow_name: Default workflow name when name is not available
+            no_steps_message: Message when workflow has no steps
+        """
         self.llm_client = llm_client
+        self.system_message = system_message
+        self.fallback_description_length = fallback_description_length
+        self.default_workflow_name = default_workflow_name
+        self.no_steps_message = no_steps_message
     
     def analyze_workflow(self, workflow: Dict) -> List[Dict]:
         """
@@ -23,7 +39,7 @@ class ProcessIssueDetector:
             List of issues: [{type, severity, description, suggestion}]
         """
         description = workflow.get('description', '')
-        name = workflow.get('name', 'Unknown')
+        name = workflow.get('name', self.default_workflow_name)
         steps = workflow.get('steps', [])
         
         prompt = f"""Analyze the following workflow description for potential issues, gaps, or problems.
@@ -58,10 +74,10 @@ If no issues are found, respond with "No issues found."
         try:
             response = self.llm_client.query(
                 prompt,
-                system_message="You are a process analyst reviewing workflows for issues. Be thorough but accurate."
+                system_message=self.system_message
             )
             
-            issues = self._parse_issues(response, workflow.get('name', 'Unknown'))
+            issues = self._parse_issues(response, workflow.get('name', self.default_workflow_name))
             return issues
         
         except Exception as e:
@@ -71,7 +87,7 @@ If no issues are found, respond with "No issues found."
     def _format_steps(self, steps: List[Dict]) -> str:
         """Format workflow steps for prompt."""
         if not steps:
-            return "No steps defined."
+            return self.no_steps_message
         
         return '\n'.join([f"{step.get('number', i+1)}. {step.get('description', '')}" 
                          for i, step in enumerate(steps)])
@@ -144,7 +160,7 @@ If no issues are found, respond with "No issues found."
                 'workflow': workflow_name,
                 'type': 'general',
                 'severity': 'medium',
-                'description': response[:500],
+                'description': response[:self.fallback_description_length],
                 'suggestion': ''
             })
         

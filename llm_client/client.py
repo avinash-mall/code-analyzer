@@ -11,8 +11,8 @@ class LocalLLMClient:
     """Client for interacting with local LLM via OpenAI-compatible API."""
     
     def __init__(self, api_base: str, api_key: str, model: str,
-                 temperature: float = 0.1, max_tokens: int = 4000,
-                 timeout: int = 300):
+                 temperature: float, max_tokens: int,
+                 timeout: int, max_retries: int, retry_backoff_base: int, test_message: str):
         """
         Initialize local LLM client.
         
@@ -23,6 +23,9 @@ class LocalLLMClient:
             temperature: Sampling temperature
             max_tokens: Maximum tokens in response
             timeout: Request timeout in seconds
+            max_retries: Maximum retry attempts on failure
+            retry_backoff_base: Base for exponential backoff (wait_time = retry_backoff_base ** attempt)
+            test_message: Message used for connection test
         """
         self.api_base = api_base
         self.api_key = api_key
@@ -30,6 +33,9 @@ class LocalLLMClient:
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.timeout = timeout
+        self.max_retries = max_retries
+        self.retry_backoff_base = retry_backoff_base
+        self.test_message = test_message
         
         # Configure OpenAI client
         self.client = openai.OpenAI(
@@ -38,15 +44,13 @@ class LocalLLMClient:
             timeout=timeout
         )
     
-    def query(self, prompt: str, system_message: str = None,
-              max_retries: int = 3) -> str:
+    def query(self, prompt: str, system_message: Optional[str]) -> str:
         """
         Query the LLM with a prompt.
         
         Args:
             prompt: User prompt
-            system_message: Optional system message
-            max_retries: Maximum retry attempts on failure
+            system_message: System message (None for no system message)
         
         Returns:
             LLM response text
@@ -58,7 +62,7 @@ class LocalLLMClient:
         
         messages.append({"role": "user", "content": prompt})
         
-        for attempt in range(max_retries):
+        for attempt in range(self.max_retries):
             try:
                 response = self.client.chat.completions.create(
                     model=self.model,
@@ -70,16 +74,20 @@ class LocalLLMClient:
                 return response.choices[0].message.content.strip()
             
             except Exception as e:
-                if attempt < max_retries - 1:
-                    wait_time = 2 ** attempt  # Exponential backoff
+                if attempt < self.max_retries - 1:
+                    wait_time = self.retry_backoff_base ** attempt  # Exponential backoff
                     print(f"LLM request failed, retrying in {wait_time}s: {e}")
                     time.sleep(wait_time)
                 else:
-                    raise Exception(f"LLM request failed after {max_retries} attempts: {e}")
+                    raise Exception(f"LLM request failed after {self.max_retries} attempts: {e}")
     
-    def query_stream(self, prompt: str, system_message: str = None):
+    def query_stream(self, prompt: str, system_message: Optional[str]):
         """
         Query the LLM with streaming response.
+        
+        Args:
+            prompt: User prompt
+            system_message: System message (None for no system message)
         
         Yields:
             Response chunks
@@ -110,7 +118,7 @@ class LocalLLMClient:
     def test_connection(self) -> bool:
         """Test if LLM server is accessible."""
         try:
-            response = self.query("Say 'OK' if you can read this.")
+            response = self.query(self.test_message, None)
             return len(response) > 0
         except Exception as e:
             print(f"LLM connection test failed: {e}")

@@ -3,175 +3,170 @@ Workflow definition and analysis.
 """
 
 from typing import Dict, List
+import concurrent.futures
 from llm_client import LocalLLMClient
 
 
 class WorkflowAnalyzer:
     """Identifies and defines workflows/processes in the codebase."""
     
-    def __init__(self, llm_client: LocalLLMClient):
-        self.llm_client = llm_client
-    
-    def define_workflow(self, entry_point: str, call_sequence: List[str],
-                       repo_map: Dict, code_snippets: Dict[str, str]) -> Dict:
+    def __init__(self, llm_client: LocalLLMClient, workflow_keywords: List[str],
+                 business_analyst_message: str, architect_overview_message: str,
+                 workflow_context_max_files: int, architecture_context_max_files: int,
+                 repo_summary_context_limit: int, workflow_file_summary_length: int,
+                 architecture_file_summary_length: int, no_file_summary_message: str,
+                 no_workflows_message: str):
         """
-        Define a workflow from entry point and call sequence.
+        Initialize workflow analyzer.
         
         Args:
-            entry_point: Entry point file/function
-            call_sequence: List of files in call sequence
-            repo_map: Repository map for context
-            code_snippets: Code snippets for files in sequence
-        
-        Returns:
-            {
-                'name': str,
-                'entry_point': str,
-                'steps': List[Dict],
-                'description': str
-            }
+            llm_client: LLM client instance
+            workflow_keywords: Keywords for identifying workflows
+            business_analyst_message: System message for business analyst
+            architect_overview_message: System message for architect overview
+            workflow_context_max_files: Maximum files per workflow context
+            architecture_context_max_files: Maximum files for architecture overview
+            repo_summary_context_limit: Maximum characters for repository summary context
+            workflow_file_summary_length: Truncate file summary to this length in workflow context
+            architecture_file_summary_length: Truncate file summary to this length in architecture context
+            no_file_summary_message: Default message when file summary is not available
+            no_workflows_message: Message when no workflows are identified
         """
-        # Build workflow outline
-        outline = self._build_workflow_outline(entry_point, call_sequence, repo_map)
+        self.llm_client = llm_client
+        self.workflow_keywords = workflow_keywords
+        self.business_analyst_message = business_analyst_message
+        self.architect_overview_message = architect_overview_message
+        self.workflow_context_max_files = workflow_context_max_files
+        self.architecture_context_max_files = architecture_context_max_files
+        self.repo_summary_context_limit = repo_summary_context_limit
+        self.workflow_file_summary_length = workflow_file_summary_length
+        self.architecture_file_summary_length = architecture_file_summary_length
+        self.no_file_summary_message = no_file_summary_message
+        self.no_workflows_message = no_workflows_message
+
+    def analyze_workflows(self, repo_map: Dict, documentation: Dict, repo_summary: str) -> Dict:
+        """
+        High-level function to identify and describe major workflows.
         
-        prompt = f"""Based on the following code flow, describe the workflow step by step in plain language.
+        Args:
+            repo_map: The repository map from the indexer.
+            documentation: Documentation generated for each file.
+            repo_summary: A summary of the repository structure.
 
-Workflow Entry Point: {entry_point}
+        Returns:
+            A dictionary where keys are workflow names and values are their descriptions.
+        """
+        # 1. Identify potential workflows/features
+        potential_workflows = self._identify_potential_workflows(repo_map, documentation)
+        
+        if not potential_workflows:
+            return {"Overall Summary": self.no_workflows_message}
 
-Call Sequence:
-{outline}
+        # 2. For each workflow, generate a description
+        workflow_descriptions = {}
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future_to_workflow = {
+                executor.submit(self._describe_workflow, name, files, repo_map, documentation, repo_summary): name
+                for name, files in potential_workflows.items()
+            }
+            for future in concurrent.futures.as_completed(future_to_workflow):
+                name = future_to_workflow[future]
+                description = future.result()
+                if description:
+                    workflow_descriptions[name] = description
+        
+        return workflow_descriptions
+
+    def _identify_potential_workflows(self, repo_map: Dict, documentation: Dict) -> Dict[str, List[str]]:
+        """Identify clusters of files that represent a business workflow."""
+        
+        # Heuristic: group files by keywords in their paths or documentation
+        clusters = {}
+        
+        for file_path, doc_info in documentation.items():
+            content_to_check = file_path.lower() + " " + doc_info.get('file_summary', '').lower()
+            
+            for keyword in self.workflow_keywords:
+                if keyword in content_to_check:
+                    if keyword not in clusters:
+                        clusters[keyword] = set()
+                    clusters[keyword].add(file_path)
+                    break # Assign file to first matching keyword cluster
+        
+        # Convert sets to lists
+        return {k: list(v) for k, v in clusters.items()}
+    
+    def _describe_workflow(self, name: str, files: List[str], repo_map: Dict,
+                          documentation: Dict, repo_summary: str) -> str:
+        """Use LLM to generate a description for an identified workflow."""
+        
+        print(f"  - Describing workflow: {name.capitalize()}...")
+        
+        context = f"The following files are considered part of the '{name}' workflow:\n"
+        for file_path in files[:self.workflow_context_max_files]: # Limit context size
+            context += f"- `{file_path}`: {documentation.get(file_path, {}).get('file_summary', '')[:self.workflow_file_summary_length]}...\n"
+        
+        prompt = f"""Based on the following files and their summaries, describe the end-to-end business workflow for '{name.capitalize()}'.
+
+{context}
 
 Please provide:
-1. A clear name for this workflow
-2. Step-by-step description of what happens
-3. Purpose and outcome
-4. Key decision points or branches
+1.  A high-level description of the workflow's purpose.
+2.  The typical sequence of events or steps.
+3.  The key business rules or logic involved.
+4.  Any potential issues, bottlenecks, or areas for improvement in the process.
 
-Write in business/process terms, describing what the system does, not technical implementation details.
+Focus on the business process, not the technical implementation.
 """
         
+        if repo_summary:
+            prompt = f"""Brief codebase context:
+{repo_summary[:self.repo_summary_context_limit]}
+
+{prompt}"""
+            
         try:
             response = self.llm_client.query(
                 prompt,
-                system_message="You are a process analyst describing workflows from code. Focus on business processes, not technical details."
+                system_message=self.business_analyst_message
             )
-            
-            # Extract workflow name and steps
-            name = self._extract_workflow_name(response, entry_point)
-            steps = self._extract_steps(response)
-            
-            # Generate Mermaid diagram
-            mermaid_diagram = self._generate_mermaid_diagram(call_sequence, repo_map)
-            
-            return {
-                'name': name,
-                'entry_point': entry_point,
-                'steps': steps,
-                'description': response,
-                'call_sequence': call_sequence,
-                'mermaid_diagram': mermaid_diagram
-            }
-        
+            return response
         except Exception as e:
-            print(f"Error defining workflow for {entry_point}: {e}")
-            return {
-                'name': entry_point,
-                'entry_point': entry_point,
-                'steps': [],
-                'description': f"Error: {e}",
-                'call_sequence': call_sequence
-            }
-    
-    def _build_workflow_outline(self, entry_point: str, call_sequence: List[str],
-                               repo_map: Dict) -> str:
-        """Build a text outline of the workflow."""
-        outline_lines = []
-        
-        for i, file_path in enumerate(call_sequence[:10], 1):  # Limit to 10 steps
-            info = repo_map.get(file_path, {})
-            defs = info.get('definitions', [])
-            
-            # Get main class/function name
-            main_def = defs[0] if defs else None
-            name = main_def.get('name', file_path) if main_def else file_path
-            
-            outline_lines.append(f"{i}. {file_path} ({name})")
-        
-        return '\n'.join(outline_lines)
-    
-    def _extract_workflow_name(self, description: str, entry_point: str) -> str:
-        """Extract workflow name from description."""
-        # Look for patterns like "The X workflow" or "X process"
-        import re
-        match = re.search(r'(?:the\s+)?([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s+(?:workflow|process)', 
-                         description, re.IGNORECASE)
-        if match:
-            return match.group(1)
-        
-        # Fallback: use entry point name
-        return entry_point.split('/')[-1].replace('.java', '').replace('.py', '')
-    
-    def _extract_steps(self, description: str) -> List[Dict]:
-        """Extract workflow steps from description."""
-        steps = []
-        lines = description.split('\n')
-        
-        for line in lines:
-            line = line.strip()
-            # Look for numbered steps or bullet points
-            import re
-            match = re.match(r'^(\d+)\.\s*(.+)', line)
-            if match:
-                steps.append({
-                    'number': int(match.group(1)),
-                    'description': match.group(2)
-                })
-            elif line.startswith('-') or line.startswith('*'):
-                steps.append({
-                    'number': len(steps) + 1,
-                    'description': re.sub(r'^[\-\*]\s*', '', line)
-                })
-        
-        # If no structured steps found, split by sentences
-        if not steps:
-            sentences = re.split(r'[.!?]\s+', description)
-            for i, sentence in enumerate(sentences[:10], 1):
-                if len(sentence.strip()) > 20:  # Only meaningful sentences
-                    steps.append({
-                        'number': i,
-                        'description': sentence.strip()
-                    })
-        
-        return steps
-    
-    def _generate_mermaid_diagram(self, call_sequence: List[str], repo_map: Dict) -> str:
-        """Generate Mermaid sequence diagram for workflow."""
-        if not call_sequence:
-            return ""
-        
-        lines = ["sequenceDiagram"]
-        
-        # Extract participant names (simplified - use file names)
-        participants = {}
-        for i, file_path in enumerate(call_sequence[:10]):  # Limit to 10 steps
-            # Get class name from file
-            info = repo_map.get(file_path, {})
-            defs = info.get('definitions', [])
-            class_name = defs[0].get('name', file_path.split('/')[-1]) if defs else file_path.split('/')[-1]
-            
-            participant_id = f"P{i}"
-            participants[file_path] = participant_id
-            lines.append(f"    participant {participant_id} as {class_name}")
-        
-        # Add interactions
-        for i in range(len(call_sequence) - 1):
-            current = call_sequence[i]
-            next_file = call_sequence[i + 1]
-            
-            current_id = participants.get(current, f"P{i}")
-            next_id = participants.get(next_file, f"P{i+1}")
-            
-            lines.append(f"    {current_id}->>{next_id}: calls")
-        
-        return '\n'.join(lines)
+            print(f"    - Error describing workflow '{name}': {e}")
+            return f"An error occurred while analyzing the '{name}' workflow."
+
+    def generate_architecture_overview(self, documentation: Dict, repo_summary: str) -> str:
+        """Generate a top-level architecture overview of the system."""
+
+        context = "The system consists of the following modules/components:\n\n"
+        for file_path, doc_info in list(documentation.items())[:self.architecture_context_max_files]: # Limit context
+             context += f"- **{file_path}**: {doc_info.get('file_summary', self.no_file_summary_message)[:self.architecture_file_summary_length]}...\n"
+
+        prompt = f"""Based on the following list of components and their summaries, generate a high-level architecture overview for the entire system.
+
+{context}
+
+Please describe:
+1.  The main subsystems or layers (e.g., UI, services, data).
+2.  The primary responsibilities of each subsystem.
+3.  How the major components seem to interact.
+4.  The overall architectural pattern, if one is apparent (e.g., Monolith, Microservices, Layered).
+
+Synthesize this information into a coherent, executive-level summary.
+"""
+        if repo_summary:
+            prompt = f"""Repository file structure summary:
+{repo_summary}
+
+{prompt}
+"""
+        try:
+            response = self.llm_client.query(
+                prompt,
+                system_message=self.architect_overview_message
+            )
+            return response
+        except Exception as e:
+            print(f"  - Error generating architecture overview: {e}")
+            return f"Error generating architecture overview: {e}"
 

@@ -3,208 +3,212 @@ Documentation generator for codebase.
 """
 
 from typing import Dict, List
+import concurrent.futures
 from llm_client import LocalLLMClient
 
 
 class DocumentationGenerator:
     """Generates documentation for code files and components."""
     
-    def __init__(self, llm_client: LocalLLMClient, symbol_to_file: Dict = None):
-        self.llm_client = llm_client
-        self.symbol_to_file = symbol_to_file or {}
-    
-    def generate_file_documentation(self, file_path: str, code: str,
-                                   definitions: List[Dict],
-                                   references: List[Dict] = None) -> Dict:
+    def __init__(self, llm_client: LocalLLMClient, symbol_to_file: Dict,
+                 technical_writer_message: str, architect_message: str,
+                 chunk_doc_truncate: int, repo_summary_context_limit: int,
+                 min_symbol_length: int, default_chunk_type: str,
+                 default_chunk_name: str, no_documentation_message: str,
+                 no_file_summary_message: str):
         """
-        Generate documentation for a file.
+        Initialize documentation generator.
+        
+        Args:
+            llm_client: LLM client instance
+            symbol_to_file: Mapping of symbol names to files
+            technical_writer_message: System message for technical writer
+            architect_message: System message for software architect
+            chunk_doc_truncate: Truncate chunk docs to this length in file summary
+            repo_summary_context_limit: Maximum characters for repository summary context
+            min_symbol_length: Minimum symbol name length for cross-referencing
+            default_chunk_type: Default chunk type when type is not available
+            default_chunk_name: Default chunk name when name is not available
+            no_documentation_message: Message when no documentation can be generated
+            no_file_summary_message: Default message when file summary is not available
+        """
+        self.llm_client = llm_client
+        self.symbol_to_file = symbol_to_file
+        self.technical_writer_message = technical_writer_message
+        self.architect_message = architect_message
+        self.chunk_doc_truncate = chunk_doc_truncate
+        self.repo_summary_context_limit = repo_summary_context_limit
+        self.min_symbol_length = min_symbol_length
+        self.default_chunk_type = default_chunk_type
+        self.default_chunk_name = default_chunk_name
+        self.no_documentation_message = no_documentation_message
+        self.no_file_summary_message = no_file_summary_message
+
+    def generate_docs_for_file(self, file_path: str, chunks: List[Dict],
+                               language: str, repo_summary: str) -> Dict:
+        """
+        Generate documentation for a file by documenting chunks and then summarizing.
         
         Returns:
             {
-                'summary': str,
-                'classes': {...},
-                'functions': {...},
-                'usage': str
+                'file_summary': str,
+                'chunk_docs': List[Dict] 
             }
         """
-        # Extract comments/docstrings if available
-        comments = self._extract_comments(code, file_path)
+        chunk_docs = []
         
-        # Format definitions
-        defs_text = self._format_definitions(definitions)
+        # Use a thread pool to document chunks in parallel
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future_to_chunk = {
+                executor.submit(self._generate_doc_for_chunk, file_path, chunk, language): chunk
+                for chunk in chunks
+            }
+            for future in concurrent.futures.as_completed(future_to_chunk):
+                chunk_docs.append(future.result())
+
+        # Sort chunk_docs by start line to maintain order
+        chunk_docs.sort(key=lambda x: x['start_line'])
+
+        # Generate file summary using chunk documentation
+        file_summary = self._generate_summary_for_file(file_path, chunk_docs, repo_summary)
         
-        # Truncate code if needed
-        max_code_length = 10000
-        code_snippet = code[:max_code_length] if len(code) > max_code_length else code
+        return {
+            'file_summary': file_summary,
+            'chunk_docs': chunk_docs
+        }
+    
+    def _generate_doc_for_chunk(self, file_path: str, chunk: Dict, language: str) -> Dict:
+        """Generate documentation for a single code chunk."""
         
-        prompt = f"""Generate comprehensive documentation for the following code file.
-
-File: {file_path}
-
-Existing comments/documentation:
-{comments[:1000] if comments else 'None found'}
-
-Code structure:
-{defs_text}
-
-Code:
-```{self._get_language_from_path(file_path)}
-{code_snippet}
-```
-
-Please provide:
-1. A clear summary of what this file/component does
-2. Purpose and responsibility
-3. Key classes and their purposes
-4. Key functions/methods and what they do
-5. How this component interacts with other parts of the system
-6. Usage examples or important notes
-
-Write in clear, professional documentation style. Be accurate and base your description on the actual code.
-"""
+        prompt = self._build_chunk_prompt(file_path, chunk, language)
         
         try:
             response = self.llm_client.query(
                 prompt,
-                system_message="You are a technical documentation writer. Write clear, accurate documentation based on the code provided."
+                system_message=self.technical_writer_message
             )
             
-            # Add cross-references
+            # Add cross-references to the documentation
             response_with_links = self._add_cross_references(response, file_path)
             
             return {
-                'file': file_path,
-                'documentation': response_with_links,
-                'definitions': definitions
+                'name': chunk['name'],
+                'type': chunk['type'],
+                'start_line': chunk['start_line'],
+                'end_line': chunk['end_line'],
+                'documentation': response_with_links
             }
-        
         except Exception as e:
-            print(f"Error generating documentation for {file_path}: {e}")
+            print(f"  - Error documenting chunk {chunk['name']}: {e}")
             return {
-                'file': file_path,
-                'documentation': f"Error generating documentation: {e}",
-                'definitions': definitions
+                'name': chunk['name'],
+                'type': chunk['type'],
+                'start_line': chunk['start_line'],
+                'end_line': chunk['end_line'],
+                'documentation': f"Error generating documentation: {e}"
             }
-    
-    def _extract_comments(self, code: str, file_path: str) -> str:
-        """Extract comments and docstrings from code."""
-        comments = []
+
+    def _build_chunk_prompt(self, file_path: str, chunk: Dict, language: str) -> str:
+        """Builds a prompt to document a single chunk."""
         
-        ext = file_path.split('.')[-1].lower()
+        chunk_type = chunk.get('type', self.default_chunk_type)
+        chunk_name = chunk.get('name', self.default_chunk_name)
+        code_snippet = chunk.get('text', '')
+
+        prompt = f"""Generate a documentation comment for the following {chunk_type} named '{chunk_name}'.
+
+File: {file_path}
+Language: {language}
+
+Code:
+```{language}
+{code_snippet}
+```
+
+Please explain its purpose, parameters (if any), and return values (if any).
+Format the output appropriately for the language (e.g., JavaDoc for Java, reStructuredText for Python).
+Be concise and accurate.
+"""
+        return prompt
+
+    def _generate_summary_for_file(self, file_path: str, chunk_docs: List[Dict], repo_summary: str) -> str:
+        """Generate a high-level summary for a file using chunk documentation."""
         
-        if ext == 'java':
-            # Extract JavaDoc comments
-            import re
-            javadoc_pattern = r'/\*\*.*?\*/'
-            matches = re.findall(javadoc_pattern, code, re.DOTALL)
-            comments.extend(matches)
+        if not chunk_docs:
+            return self.no_documentation_message
         
-        elif ext == 'py':
-            # Extract docstrings
-            import re
-            docstring_pattern = r'""".*?"""'
-            matches = re.findall(docstring_pattern, code, re.DOTALL)
-            comments.extend(matches)
-        
-        return '\n\n'.join(comments[:5])  # Limit to first 5 comments
-    
-    def _format_definitions(self, definitions: List[Dict]) -> str:
-        """Format definitions for prompt."""
-        if not definitions:
-            return "No major definitions found."
-        
-        lines = []
-        for defn in definitions:
-            def_type = defn.get('type', 'unknown')
-            name = defn.get('name', 'unknown')
-            line = defn.get('line', '?')
-            methods = defn.get('methods', [])
-            
-            line_text = f"  - {def_type}: {name} (line {line})"
-            if methods:
-                line_text += f" [methods: {', '.join(methods[:5])}]"
-            lines.append(line_text)
-        
-        return '\n'.join(lines)
-    
-    def _get_language_from_path(self, file_path: str) -> str:
-        """Get language identifier from file path."""
-        ext = file_path.split('.')[-1].lower()
-        lang_map = {
-            'java': 'java',
-            'py': 'python',
-            'js': 'javascript',
-            'ts': 'typescript'
-        }
-        return lang_map.get(ext, 'text')
-    
+        context = "Here is the documentation for each component in the file:\n\n"
+        for doc in chunk_docs:
+            context += f"## {doc['type']}: {doc['name']}\n"
+            context += f"{doc['documentation'][:self.chunk_doc_truncate]}\n\n" # Truncate to keep context manageable
+
+        prompt = f"""Given the documentation for all components in the file '{file_path}', write a high-level summary.
+
+{context}
+
+Please provide:
+1.  A one-paragraph summary of the file's overall purpose and responsibility.
+2.  A brief description of how the components interact.
+
+Do not repeat the detailed documentation, but synthesize it into a coherent overview.
+"""
+
+        if repo_summary:
+            prompt = f"""Brief codebase context:
+{repo_summary[:self.repo_summary_context_limit]}
+
+{prompt}
+"""
+
+        try:
+            response = self.llm_client.query(
+                prompt,
+                system_message=self.architect_message
+            )
+            return response
+        except Exception as e:
+            print(f"  - Error generating summary for {file_path}: {e}")
+            return f"Error generating summary: {e}"
+
     def _add_cross_references(self, documentation: str, current_file: str) -> str:
         """Add hyperlinks to class/function names mentioned in documentation."""
         import re
         
-        # Find all potential class/function names (capitalized words, camelCase, etc.)
-        # This is a simple heuristic - could be improved
-        
+        if not self.symbol_to_file:
+            return documentation
+            
         result = documentation
         
-        # Look for class names (capitalized, possibly with package)
-        for symbol_name, files in self.symbol_to_file.items():
-            if len(symbol_name) < 3:  # Skip very short names
+        # Sort symbols by length to match longer names first
+        sorted_symbols = sorted(self.symbol_to_file.keys(), key=len, reverse=True)
+        
+        for symbol_name in sorted_symbols:
+            if len(symbol_name) < self.min_symbol_length:  # Skip very short names
                 continue
             
-            # Create link pattern
-            # Match whole words only
-            pattern = r'\b' + re.escape(symbol_name) + r'\b'
+            # Match whole words only, not as part of another word
+            pattern = r'\b(' + re.escape(symbol_name) + r')\b'
             
-            for file_path in files:
-                if file_path != current_file:
-                    # Create anchor link
-                    anchor = file_path.replace('/', '-').replace('\\', '-')
-                    link = f'<a href="#file-{anchor}" class="doc-link">{symbol_name}</a>'
-                    result = re.sub(pattern, link, result, count=1)  # Replace first occurrence only
-                    break  # Use first file that defines it
+            files = self.symbol_to_file[symbol_name]
+            
+            # Find a file that is not the current one, if possible
+            target_file = None
+            if files:
+                for f in files:
+                    if f != current_file:
+                        target_file = f
+                        break
+                if not target_file:
+                    target_file = files[0] # Link to self if only defined here
+
+                # Create anchor link
+                anchor = target_file.replace('/', '-').replace('\\', '-').replace('.', '_')
+                link = f'<a href="#file-{anchor}" class="doc-link">\\1</a>'
+                
+                # Replace if not already inside a link
+                # This is a simple check to avoid nested links
+                if f'href="#file-' not in result:
+                    result = re.sub(pattern, link, result)
         
         return result
-    
-    def generate_method_documentation(self, file_path: str, method_name: str,
-                                     method_code: str, class_context: str = "") -> Dict:
-        """Generate documentation for a specific method."""
-        prompt = f"""Generate documentation for the following method.
-
-File: {file_path}
-Method: {method_name}
-
-Class context:
-{class_context[:1000] if class_context else 'N/A'}
-
-Method code:
-```{self._get_language_from_path(file_path)}
-{method_code}
-```
-
-Please provide:
-1. Purpose and responsibility
-2. Parameters (if any)
-3. Return value (if any)
-4. Side effects or exceptions
-5. Usage examples if helpful
-"""
-        
-        try:
-            response = self.llm_client.query(
-                prompt,
-                system_message="You are a technical documentation writer. Write clear, accurate method documentation."
-            )
-            
-            return {
-                'method': method_name,
-                'file': file_path,
-                'documentation': response
-            }
-        except Exception as e:
-            return {
-                'method': method_name,
-                'file': file_path,
-                'documentation': f"Error: {e}"
-            }
 

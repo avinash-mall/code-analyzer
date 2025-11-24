@@ -14,14 +14,27 @@ from .parser import CodeParser
 class RepositoryIndexer:
     """Builds a repository map from codebase."""
     
-    def __init__(self, parser: CodeParser):
+    def __init__(self, parser: CodeParser, repo_summary_max_files: int,
+                 max_methods_shown: int, max_functions_shown: int):
+        """
+        Initialize repository indexer.
+        
+        Args:
+            parser: CodeParser instance
+            repo_summary_max_files: Maximum number of files to include in repository summary
+            max_methods_shown: Maximum number of methods to show per class in summary
+            max_functions_shown: Maximum number of functions to show in summary
+        """
         self.parser = parser
         self.repo_map = {}
         self.symbol_to_file = {}  # Maps symbol names to files
+        self.repo_summary_max_files = repo_summary_max_files
+        self.max_methods_shown = max_methods_shown
+        self.max_functions_shown = max_functions_shown
     
     def index_codebase(self, root_path: str, extensions: List[str], 
-                      exclude_patterns: List[str] = None,
-                      max_file_size: int = 1000000) -> Dict:
+                      exclude_patterns: List[str],
+                      max_file_size: int) -> Dict:
         """
         Index entire codebase.
         
@@ -51,7 +64,11 @@ class RepositoryIndexer:
                 with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                     code = f.read()
                 
+                if not code.strip():
+                    continue # Skip empty files
+
                 parse_result = self.parser.parse_file(file_path, code)
+                chunks = self.parser.chunk_code(file_path, code)
                 
                 # Store relative path
                 rel_path = os.path.relpath(file_path, root_path)
@@ -61,7 +78,7 @@ class RepositoryIndexer:
                     'references': parse_result['references'],
                     'language': parse_result.get('language'),
                     'file_path': file_path,
-                    'code': code  # Store code for later use
+                    'chunks': chunks, # Store chunks instead of full code
                 }
                 
                 # Build symbol-to-file mapping
@@ -79,12 +96,10 @@ class RepositoryIndexer:
         return self.repo_map
     
     def _collect_files(self, root_path: str, extensions: List[str],
-                      exclude_patterns: List[str] = None) -> List[str]:
+                      exclude_patterns: List[str]) -> List[str]:
         """Collect all source files matching criteria."""
         files = []
         root = Path(root_path)
-        
-        exclude_patterns = exclude_patterns or []
         
         for ext in extensions:
             for file_path in root.rglob(f'*{ext}'):
@@ -109,7 +124,7 @@ class RepositoryIndexer:
         pattern = pattern.replace('**/', '').replace('**', '')
         return fnmatch.fnmatch(path, f'*{pattern}*')
     
-    def get_repository_summary(self, max_files: int = 100) -> str:
+    def get_repository_summary(self) -> str:
         """
         Generate a concise summary of the repository for LLM context.
         Includes most important files (by centrality or size).
@@ -121,7 +136,7 @@ class RepositoryIndexer:
             self.repo_map.items(),
             key=lambda x: len(x[1]['definitions']),
             reverse=True
-        )[:max_files]
+        )[:self.repo_summary_max_files]
         
         for file_path, info in sorted_files:
             defs = info['definitions']
@@ -133,12 +148,12 @@ class RepositoryIndexer:
                 summary_lines.append("Classes:")
                 for cls in classes:
                     methods = cls.get('methods', [])
-                    methods_str = ', '.join(methods[:5])  # Limit methods shown
+                    methods_str = ', '.join(methods[:self.max_methods_shown])  # Limit methods shown
                     summary_lines.append(f"  - {cls['name']}" + 
                                         (f" (methods: {methods_str})" if methods_str else ""))
             if functions:
                 summary_lines.append("Functions/Methods:")
-                for func in functions[:10]:  # Limit functions shown
+                for func in functions[:self.max_functions_shown]:  # Limit functions shown
                     summary_lines.append(f"  - {func['name']}")
         
         return '\n'.join(summary_lines)

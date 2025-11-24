@@ -24,13 +24,21 @@ except ImportError:
 class ContentIndex:
     """Vector index for semantic code search."""
     
-    def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
+    def __init__(self, model_name: str, chunk_size: int, collection_name: str, collection_space: str, search_top_k: int):
         """
         Initialize content index with embedding model.
         
         Args:
             model_name: SentenceTransformer model name
+            chunk_size: Approximate characters per chunk for indexing
+            collection_name: ChromaDB collection name
+            collection_space: ChromaDB distance metric (cosine, l2, ip)
+            search_top_k: Default number of results to return from semantic search
         """
+        self.chunk_size = chunk_size
+        self.collection_name = collection_name
+        self.collection_space = collection_space
+        self.search_top_k = search_top_k
         self.model = None
         self.client = None
         self.collection = None
@@ -45,19 +53,18 @@ class ContentIndex:
             try:
                 self.client = chromadb.Client()
                 self.collection = self.client.get_or_create_collection(
-                    name="code_index",
-                    metadata={"hnsw:space": "cosine"}
+                    name=collection_name,
+                    metadata={"hnsw:space": collection_space}
                 )
             except Exception as e:
                 print(f"Warning: Could not initialize ChromaDB: {e}")
     
-    def index_codebase(self, repo_map: Dict, chunk_size: int = 500) -> None:
+    def index_codebase(self, repo_map: Dict) -> None:
         """
         Index codebase by embedding code chunks.
         
         Args:
             repo_map: Repository map with code content
-            chunk_size: Approximate characters per chunk
         """
         if not self.model or not self.collection:
             print("Content indexing skipped (dependencies not available)")
@@ -75,7 +82,7 @@ class ContentIndex:
                 continue
             
             # Split code into chunks
-            chunks = self._chunk_code(code, chunk_size)
+            chunks = self._chunk_code(code, self.chunk_size)
             
             for i, chunk in enumerate(chunks):
                 chunk_id = f"{file_path}:{i}"
@@ -127,19 +134,21 @@ class ContentIndex:
         
         return chunks
     
-    def search(self, query: str, top_k: int = 5) -> List[Dict]:
+    def search(self, query: str, top_k: int = None) -> List[Dict]:
         """
         Search codebase semantically.
         
         Args:
             query: Search query
-            top_k: Number of results to return
+            top_k: Number of results to return (uses instance default if None)
         
         Returns:
             List of relevant code chunks with metadata
         """
         if not self.model or not self.collection:
             return []
+        
+        k = top_k if top_k is not None else self.search_top_k
         
         try:
             # Generate query embedding
@@ -148,7 +157,7 @@ class ContentIndex:
             # Search
             results = self.collection.query(
                 query_embeddings=[query_embedding.tolist()],
-                n_results=top_k
+                n_results=k
             )
             
             # Format results
