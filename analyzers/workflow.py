@@ -15,7 +15,7 @@ class WorkflowAnalyzer:
                  workflow_context_max_files: int, architecture_context_max_files: int,
                  repo_summary_context_limit: int, workflow_file_summary_length: int,
                  architecture_file_summary_length: int, no_file_summary_message: str,
-                 no_workflows_message: str):
+                 no_workflows_message: str, max_workflows: int = None):
         """
         Initialize workflow analyzer.
         
@@ -31,6 +31,7 @@ class WorkflowAnalyzer:
             architecture_file_summary_length: Truncate file summary to this length in architecture context
             no_file_summary_message: Default message when file summary is not available
             no_workflows_message: Message when no workflows are identified
+            max_workflows: Maximum number of workflows to analyze (None = no limit)
         """
         self.llm_client = llm_client
         self.workflow_keywords = workflow_keywords
@@ -43,6 +44,7 @@ class WorkflowAnalyzer:
         self.architecture_file_summary_length = architecture_file_summary_length
         self.no_file_summary_message = no_file_summary_message
         self.no_workflows_message = no_workflows_message
+        self.max_workflows = max_workflows
 
     def analyze_workflows(self, repo_map: Dict, documentation: Dict, repo_summary: str) -> Dict:
         """
@@ -54,26 +56,42 @@ class WorkflowAnalyzer:
             repo_summary: A summary of the repository structure.
 
         Returns:
-            A dictionary where keys are workflow names and values are their descriptions.
+            A dictionary where keys are workflow names and values are workflow data dicts.
         """
         # 1. Identify potential workflows/features
         potential_workflows = self._identify_potential_workflows(repo_map, documentation)
         
         if not potential_workflows:
-            return {"Overall Summary": self.no_workflows_message}
+            return {"Overall Summary": {
+                'name': 'Overall Summary',
+                'description': self.no_workflows_message,
+                'steps': [],
+                'diagram': None
+            }}
+
+        # Apply max_workflows limit if configured
+        if self.max_workflows is not None:
+            workflow_items = list(potential_workflows.items())[:self.max_workflows]
+            potential_workflows = dict(workflow_items)
+            if len(potential_workflows) < len(list(potential_workflows.items())):
+                print(f"  > Limiting workflows to {self.max_workflows} (config: max_workflows)")
 
         # 2. For each workflow, generate a description
         workflow_descriptions = {}
         with concurrent.futures.ThreadPoolExecutor() as executor:
             future_to_workflow = {
-                executor.submit(self._describe_workflow, name, files, repo_map, documentation, repo_summary): name
+                executor.submit(self._describe_workflow, name, files, repo_map, documentation, repo_summary): (name, files)
                 for name, files in potential_workflows.items()
             }
             for future in concurrent.futures.as_completed(future_to_workflow):
-                name = future_to_workflow[future]
-                description = future.result()
-                if description:
-                    workflow_descriptions[name] = description
+                name, files = future_to_workflow[future]
+                workflow_data = future.result()
+                if workflow_data:
+                    # Ensure workflow data includes files and entry_point for Elasticsearch
+                    workflow_data['files'] = files
+                    # Use first file as entry point (or could be enhanced to find actual entry point)
+                    workflow_data['entry_point'] = files[0] if files else ''
+                    workflow_descriptions[name] = workflow_data
         
         return workflow_descriptions
 
@@ -97,7 +115,7 @@ class WorkflowAnalyzer:
         return {k: list(v) for k, v in clusters.items()}
     
     def _describe_workflow(self, name: str, files: List[str], repo_map: Dict,
-                          documentation: Dict, repo_summary: str) -> str:
+                          documentation: Dict, repo_summary: str) -> Dict:
         """Use LLM to generate a description for an identified workflow."""
         
         print(f"  - Describing workflow: {name.capitalize()}...")
@@ -110,13 +128,13 @@ class WorkflowAnalyzer:
 
 {context}
 
-Please provide:
-1.  A high-level description of the workflow's purpose.
-2.  The typical sequence of events or steps.
-3.  The key business rules or logic involved.
-4.  Any potential issues, bottlenecks, or areas for improvement in the process.
+Return JSON with keys:
+- "name": workflow name
+- "description": 2-3 sentence overview
+- "steps": list of short step descriptions (max 10)
+- "diagram": Mermaid sequence diagram code (optional)
 
-Focus on the business process, not the technical implementation.
+Do not include any other fields. Focus on the business process, not the technical implementation.
 """
         
         if repo_summary:
@@ -130,10 +148,32 @@ Focus on the business process, not the technical implementation.
                 prompt,
                 system_message=self.business_analyst_message
             )
-            return response
+            # Try to parse JSON response
+            import json
+            import re
+            # Extract JSON from response (might have markdown code blocks)
+            json_match = re.search(r'\{[\s\S]*\}', response)
+            if json_match:
+                try:
+                    workflow_data = json.loads(json_match.group(0))
+                    return workflow_data
+                except json.JSONDecodeError:
+                    pass
+            # Fallback to text description if JSON parsing fails
+            return {
+                'name': name,
+                'description': response[:500],  # Truncate if too long
+                'steps': [],
+                'diagram': None
+            }
         except Exception as e:
             print(f"    - Error describing workflow '{name}': {e}")
-            return f"An error occurred while analyzing the '{name}' workflow."
+            return {
+                'name': name,
+                'description': f"An error occurred while analyzing the '{name}' workflow.",
+                'steps': [],
+                'diagram': None
+            }
 
     def generate_architecture_overview(self, documentation: Dict, repo_summary: str) -> str:
         """Generate a top-level architecture overview of the system."""

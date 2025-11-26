@@ -5,6 +5,8 @@ OpenAI-compatible client for local LLMs.
 import openai
 from typing import List, Dict, Optional
 import time
+import requests
+from openai import APIError, APIConnectionError, APITimeoutError
 
 
 class LocalLLMClient:
@@ -73,13 +75,30 @@ class LocalLLMClient:
                 
                 return response.choices[0].message.content.strip()
             
+            except APIConnectionError as e:
+                if attempt < self.max_retries - 1:
+                    wait_time = self.retry_backoff_base ** attempt
+                    print(f"LLM connection error, retrying in {wait_time}s: {e}")
+                    time.sleep(wait_time)
+                else:
+                    raise ConnectionError(f"LLM connection failed after {self.max_retries} attempts. Check api_base ({self.api_base}) and ensure the server is running.") from e
+            except APITimeoutError as e:
+                if attempt < self.max_retries - 1:
+                    wait_time = self.retry_backoff_base ** attempt
+                    print(f"LLM request timeout, retrying in {wait_time}s: {e}")
+                    time.sleep(wait_time)
+                else:
+                    raise TimeoutError(f"LLM request timed out after {self.max_retries} attempts (timeout={self.timeout}s).") from e
+            except APIError as e:
+                # API errors (e.g., invalid model, rate limit) - don't retry
+                raise ValueError(f"LLM API error: {e}. Check model name ({self.model}) and API configuration.") from e
             except Exception as e:
                 if attempt < self.max_retries - 1:
-                    wait_time = self.retry_backoff_base ** attempt  # Exponential backoff
+                    wait_time = self.retry_backoff_base ** attempt
                     print(f"LLM request failed, retrying in {wait_time}s: {e}")
                     time.sleep(wait_time)
                 else:
-                    raise Exception(f"LLM request failed after {self.max_retries} attempts: {e}")
+                    raise RuntimeError(f"LLM request failed after {self.max_retries} attempts: {e}") from e
     
     def query_stream(self, prompt: str, system_message: Optional[str]):
         """
@@ -112,8 +131,14 @@ class LocalLLMClient:
                 if chunk.choices[0].delta.content:
                     yield chunk.choices[0].delta.content
         
+        except APIConnectionError as e:
+            raise ConnectionError(f"LLM streaming connection failed. Check api_base ({self.api_base}) and ensure the server is running.") from e
+        except APITimeoutError as e:
+            raise TimeoutError(f"LLM streaming request timed out (timeout={self.timeout}s).") from e
+        except APIError as e:
+            raise ValueError(f"LLM streaming API error: {e}. Check model name ({self.model}) and API configuration.") from e
         except Exception as e:
-            raise Exception(f"LLM streaming request failed: {e}")
+            raise RuntimeError(f"LLM streaming request failed: {e}") from e
     
     def test_connection(self) -> bool:
         """Test if LLM server is accessible."""

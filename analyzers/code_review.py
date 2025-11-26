@@ -3,6 +3,7 @@ Code review and bug detection analyzer.
 """
 
 import re
+import json
 from typing import Dict, List
 from llm_client import LocalLLMClient
 
@@ -32,7 +33,8 @@ class CodeReviewAnalyzer:
         self.no_issues_message = no_issues_message
     
     def analyze_file_chunks(self, file_path: str, chunks: List[Dict], 
-                           language: str, repo_summary: str) -> List[Dict]:
+                           language: str, repo_summary: str, 
+                           static_findings: List[Dict] = None) -> List[Dict]:
         """
         Analyze a file's chunks for code issues.
         
@@ -41,11 +43,13 @@ class CodeReviewAnalyzer:
             chunks: List of code chunks from the parser
             language: The programming language of the file
             repo_summary: Repository summary for context
+            static_findings: Optional list of static analysis findings for this file
         
         Returns:
             List of issues: [{file, line, type, severity, description, suggestion}]
         """
         all_issues = []
+        static_findings = static_findings or []
         
         for i, chunk in enumerate(chunks):
             print(f"  - Analyzing chunk {i+1}/{len(chunks)} ({chunk['name']})...")
@@ -54,7 +58,14 @@ class CodeReviewAnalyzer:
             if not chunk_text.strip():
                 continue
             
-            prompt = self._build_prompt(file_path, chunk, language, repo_summary)
+            # Get static hints for this chunk's line range
+            chunk_start = chunk.get('start_line', 0)
+            chunk_end = chunk.get('end_line', 0)
+            chunk_static_hints = self._get_static_hints_for_chunk(
+                static_findings, chunk_start, chunk_end
+            )
+            
+            prompt = self._build_prompt(file_path, chunk, language, repo_summary, chunk_static_hints)
             
             try:
                 response = self.llm_client.query(
@@ -70,7 +81,41 @@ class CodeReviewAnalyzer:
         
         return self._deduplicate_issues(all_issues)
 
-    def _build_prompt(self, file_path: str, chunk: Dict, language: str, repo_summary: str) -> str:
+    def _get_static_hints_for_chunk(self, static_findings: List[Dict], 
+                                    chunk_start: int, chunk_end: int) -> str:
+        """Extract static analysis hints for a specific chunk's line range."""
+        if not static_findings:
+            return ""
+        
+        relevant_findings = []
+        for finding in static_findings:
+            line = finding.get('line', 0)
+            if chunk_start <= line <= chunk_end:
+                relevant_findings.append(finding)
+        
+        # Limit to top 10 findings to avoid clutter
+        relevant_findings = relevant_findings[:10]
+        
+        if not relevant_findings:
+            return ""
+        
+        static_hints = "\nStatic analysis findings for this code section:\n"
+        for finding in relevant_findings:
+            severity = finding.get('severity', 'info').upper()
+            line = finding.get('line', '?')
+            message = finding.get('message', '')
+            rule = finding.get('rule', 'unknown')
+            static_hints += (
+                f"- Line {line}: [{severity}] "
+                f"{message} "
+                f"({rule})\n"
+            )
+        static_hints += "\n"
+        
+        return static_hints
+    
+    def _build_prompt(self, file_path: str, chunk: Dict, language: str, 
+                     repo_summary: str, static_hints: str = "") -> str:
         """Build the prompt for a single code chunk."""
         
         code_snippet = chunk['text']
@@ -87,7 +132,7 @@ Code Snippet:
 ```{language}
 {code_snippet}
 ```
-
+{static_hints}
 Please identify:
 1.  Potential bugs (null pointer exceptions, logic errors, etc.)
 2.  Security vulnerabilities
@@ -99,10 +144,23 @@ For each issue found, provide:
 -   Line number (relative to the file, if possible, starting from {start_line})
 -   Issue type (e.g., Bug, Vulnerability, Code Smell)
 -   Severity (High/Medium/Low)
--   Description of the issue
+-   Description of the issue (keep under 3 sentences)
 -   Suggestion for a fix
 
-Format your response as a list, one issue per item. If no issues are found, respond with "{no_issues_msg}".
+Return at most 10 of the most important issues. Prefer high severity problems.
+
+IMPORTANT: Return ONLY valid JSON, no other text. Use this exact format:
+[
+  {{
+    "line": <int or null>,
+    "type": "<string>",
+    "severity": "high|medium|low",
+    "description": "<string>",
+    "suggestion": "<string>"
+  }}
+]
+
+If no issues are found, return an empty array: []
 """
         
         if repo_summary:
@@ -114,9 +172,32 @@ Format your response as a list, one issue per item. If no issues are found, resp
         return prompt
 
     def _parse_issues(self, response: str, file_path: str) -> List[Dict]:
-        """Parse LLM response into structured issues."""
+        """Parse LLM response into structured issues. Tries JSON first, falls back to text parsing."""
         issues = []
         
+        # Try JSON parsing first
+        try:
+            # Extract JSON from response (might be wrapped in markdown code blocks)
+            json_match = re.search(r'\[[\s\S]*\]', response)
+            if json_match:
+                json_str = json_match.group(0)
+                parsed_issues = json.loads(json_str)
+                
+                for issue in parsed_issues:
+                    issues.append({
+                        'file': file_path,
+                        'line': issue.get('line'),
+                        'type': issue.get('type', self.default_issue_type),
+                        'severity': issue.get('severity', 'medium').lower(),
+                        'description': issue.get('description', ''),
+                        'suggestion': issue.get('suggestion', '')
+                    })
+                return issues
+        except (json.JSONDecodeError, AttributeError, KeyError):
+            # Fall back to text parsing
+            pass
+        
+        # Fallback: text-based parsing (original logic)
         if self.no_issues_message.lower() in response.lower() or "no issues found" in response.lower():
             return issues
             

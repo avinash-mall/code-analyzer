@@ -26,5 +26,8 @@ numpy>=1.24.0  # Required by sentence-transformers
 # Install if you want static analysis features
 semgrep>=1.0.0  # Provides the semgrep CLI tool
 
+# Elasticsearch client for incremental analysis
+elasticsearch>=8.0.0
+
 # Note: SonarQube is an external server tool, not a Python package
 # - SonarQube: Download from https://www.sonarqube.org (requires separate server setup)

@@ -2,6 +2,8 @@
 Process issue detection analyzer.
 """
 
+import json
+import re
 from typing import Dict, List
 from llm_client import LocalLLMClient
 
@@ -68,7 +70,17 @@ For each issue found, provide:
 - Description
 - Suggestion for improvement
 
-If no issues are found, respond with "No issues found."
+IMPORTANT: Return ONLY valid JSON, no other text. Use this exact format:
+[
+  {{
+    "type": "<string>",
+    "severity": "high|medium|low",
+    "description": "<string>",
+    "suggestion": "<string>"
+  }}
+]
+
+If no issues are found, return an empty array: []
 """
         
         try:
@@ -93,9 +105,31 @@ If no issues are found, respond with "No issues found."
                          for i, step in enumerate(steps)])
     
     def _parse_issues(self, response: str, workflow_name: str) -> List[Dict]:
-        """Parse LLM response into structured issues."""
+        """Parse LLM response into structured issues. Tries JSON first, falls back to text parsing."""
         issues = []
         
+        # Try JSON parsing first
+        try:
+            # Extract JSON from response (might be wrapped in markdown code blocks)
+            json_match = re.search(r'\[[\s\S]*\]', response)
+            if json_match:
+                json_str = json_match.group(0)
+                parsed_issues = json.loads(json_str)
+                
+                for issue in parsed_issues:
+                    issues.append({
+                        'workflow': workflow_name,
+                        'type': issue.get('type', 'general'),
+                        'severity': issue.get('severity', 'medium').lower(),
+                        'description': issue.get('description', ''),
+                        'suggestion': issue.get('suggestion', '')
+                    })
+                return issues
+        except (json.JSONDecodeError, AttributeError, KeyError):
+            # Fall back to text parsing
+            pass
+        
+        # Fallback: text-based parsing (original logic)
         if 'no issues found' in response.lower():
             return issues
         
@@ -130,7 +164,6 @@ If no issues are found, respond with "No issues found."
                 issue_type = 'transaction'
             
             # New issue if line starts with number or bullet
-            import re
             if re.match(r'^[\d\-\*•]', line):
                 if current_issue:
                     issues.append(current_issue)

@@ -115,7 +115,7 @@ class DocumentationGenerator:
         chunk_name = chunk.get('name', self.default_chunk_name)
         code_snippet = chunk.get('text', '')
 
-        prompt = f"""Generate a documentation comment for the following {chunk_type} named '{chunk_name}'.
+        prompt = f"""Generate concise documentation for the following {chunk_type} named '{chunk_name}'.
 
 File: {file_path}
 Language: {language}
@@ -125,9 +125,12 @@ Code:
 {code_snippet}
 ```
 
-Please explain its purpose, parameters (if any), and return values (if any).
-Format the output appropriately for the language (e.g., JavaDoc for Java, reStructuredText for Python).
-Be concise and accurate.
+Provide:
+1. A 2-3 sentence summary of the {chunk_type}'s purpose.
+2. A brief description of parameters (if any) and return values (if any).
+3. Format the output appropriately for the language (e.g., JavaDoc for Java, reStructuredText for Python).
+
+Keep the output under 150 words. Be concise and accurate.
 """
         return prompt
 
@@ -142,15 +145,16 @@ Be concise and accurate.
             context += f"## {doc['type']}: {doc['name']}\n"
             context += f"{doc['documentation'][:self.chunk_doc_truncate]}\n\n" # Truncate to keep context manageable
 
-        prompt = f"""Given the documentation for all components in the file '{file_path}', write a high-level summary.
+        prompt = f"""Given the documentation for all components in the file '{file_path}', write a concise high-level summary.
 
 {context}
 
-Please provide:
-1.  A one-paragraph summary of the file's overall purpose and responsibility.
-2.  A brief description of how the components interact.
+Provide:
+1. A 2-3 sentence summary of the file's purpose.
+2. A bullet list (max 5 bullets) of key classes and functions and what they do.
+3. A note on how this file interacts with other parts of the system.
 
-Do not repeat the detailed documentation, but synthesize it into a coherent overview.
+Keep the overall output under 250 words. Do not repeat the detailed documentation, but synthesize it into a coherent overview.
 """
 
         if repo_summary:
